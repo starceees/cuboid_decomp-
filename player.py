@@ -9,6 +9,7 @@ class KeyboardPlayerPyGame(Player):
         self.last_act = Action.IDLE
         self.screen = None
         self.keymap = None
+        self.target_image = None # The target image
         super(KeyboardPlayerPyGame, self).__init__()
 
     def reset(self):
@@ -59,6 +60,9 @@ class KeyboardPlayerPyGame(Player):
         concat_img = cv2.line(concat_img, (int(h/2), 0), (int(h/2), w), color, 2)
         concat_img = cv2.line(concat_img, (0, int(w/2)), (h, int(w/2)), color, 2)
 
+        # TODO: should we store the concat one or all the 4 images?
+        self.target_image = concat_img
+
         w_offset = 25
         h_offset = 10
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -102,6 +106,15 @@ class KeyboardPlayerPyGame(Player):
 
         pygame.display.set_caption("KeyboardPlayer:fpv")
         rgb = convert_opencv_img_to_pygame(fpv)
+
+        # High level draft on what function we should implement
+        if in EXPLORATION:
+            slam_draw_map(rgb) # wrapper function to invoke the SLAM to draw the map
+        elif in NAVIGATION:
+            # coord_picture should be a map of the maze, and our current postition and the position of the goal
+            coord_picture = slam_find_position(self.target_image)
+            cv.imshow(coord_picture)
+
         self.screen.blit(rgb, (0, 0))
         pygame.display.update()
 
