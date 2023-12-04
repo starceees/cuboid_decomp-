@@ -1,7 +1,21 @@
 from vis_nav_game import Player, Action
 import pygame
 import cv2
+import numpy as np
+import PIL.Image as Image
 
+
+from test_simple_modified import DepthModel
+
+# Configuration for model
+config = {
+    'load_weights_folder': '/Users/tangxinran/Documents/NYU/robot_perception/project/LiteMono/weights',
+    'model': 'lite-mono',
+    'no_cuda': True,
+}
+
+# Camera intrinsic matrix
+camera_matrix = np.array([[92., 0, 160.], [0, 92., 120.], [0, 0, 1]])
 
 class KeyboardPlayerPyGame(Player):
     def __init__(self):
@@ -10,6 +24,8 @@ class KeyboardPlayerPyGame(Player):
         self.screen = None
         self.keymap = None
         self.target_image = None # The target image
+        self.depth_model = DepthModel(config)  # Create an instance of DepthModel
+
         super(KeyboardPlayerPyGame, self).__init__()
 
     def reset(self):
@@ -82,15 +98,24 @@ class KeyboardPlayerPyGame(Player):
         super(KeyboardPlayerPyGame, self).set_target_images(images)
         self.show_target_images()
 
+
+    
+
+
     def see(self, fpv):
         if fpv is None or len(fpv.shape) < 3:
             return
 
         self.fpv = fpv
 
+        
+
         if self.screen is None:
             h, w, _ = fpv.shape
             self.screen = pygame.display.set_mode((w, h))
+        
+
+        
 
         def convert_opencv_img_to_pygame(opencv_image):
             """
@@ -104,21 +129,35 @@ class KeyboardPlayerPyGame(Player):
 
             return pygame_image
 
+        # Update the occupancy map with the new FPV image
+        # self.occupancy_map.update(fpv)  # Convert to grayscale if required by your processing
+        # # Visualize the occupancy map
+        # self.occupancy_map.visualize()
+        
         pygame.display.set_caption("KeyboardPlayer:fpv")
         rgb = convert_opencv_img_to_pygame(fpv)
 
-        # High level draft on what function we should implement
-        if in EXPLORATION:
-            slam_draw_map(rgb) # wrapper function to invoke the SLAM to draw the map
-        elif in NAVIGATION:
-            # coord_picture should be a map of the maze, and our current postition and the position of the goal
-            coord_picture = slam_find_position(self.target_image)
-            cv.imshow(coord_picture)
+        # Convert OpenCV image (fpv) to PIL Image
+        fpv_rgb = cv2.cvtColor(fpv, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+        rgb_image = Image.fromarray(fpv_rgb)
+
+        depth_info = self.depth_model.process_image(rgb_image)
+        # print(depth_info)
+
 
         self.screen.blit(rgb, (0, 0))
         pygame.display.update()
 
 
+
+        
+
+
+
+
+
+
 if __name__ == "__main__":
     import vis_nav_game
     vis_nav_game.play(the_player=KeyboardPlayerPyGame())
+
