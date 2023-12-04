@@ -17,6 +17,8 @@ config = {
 # Camera intrinsic matrix
 camera_matrix = np.array([[92., 0, 160.], [0, 92., 120.], [0, 0, 1]])
 
+
+    
 class KeyboardPlayerPyGame(Player):
     def __init__(self):
         self.fpv = None
@@ -25,6 +27,10 @@ class KeyboardPlayerPyGame(Player):
         self.keymap = None
         self.target_image = None # The target image
         self.depth_model = DepthModel(config)  # Create an instance of DepthModel
+
+        self.fpv_counter = 0  # Add a counter for fpv frames
+
+
 
         super(KeyboardPlayerPyGame, self).__init__()
 
@@ -59,7 +65,9 @@ class KeyboardPlayerPyGame(Player):
             if event.type == pygame.KEYUP:
                 if event.key in self.keymap:
                     self.last_act ^= self.keymap[event.key]
+
         return self.last_act
+
 
     def show_target_images(self):
         targets = self.get_target_images()
@@ -99,8 +107,6 @@ class KeyboardPlayerPyGame(Player):
         self.show_target_images()
 
 
-    
-
 
     def see(self, fpv):
         if fpv is None or len(fpv.shape) < 3:
@@ -129,26 +135,26 @@ class KeyboardPlayerPyGame(Player):
 
             return pygame_image
 
-        # Update the occupancy map with the new FPV image
-        # self.occupancy_map.update(fpv)  # Convert to grayscale if required by your processing
-        # # Visualize the occupancy map
-        # self.occupancy_map.visualize()
+
         
         pygame.display.set_caption("KeyboardPlayer:fpv")
         rgb = convert_opencv_img_to_pygame(fpv)
-
-        # Convert OpenCV image (fpv) to PIL Image
-        fpv_rgb = cv2.cvtColor(fpv, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
-        rgb_image = Image.fromarray(fpv_rgb)
-
-        depth_info = self.depth_model.process_image(rgb_image)
-        # print(depth_info)
-
 
         self.screen.blit(rgb, (0, 0))
         pygame.display.update()
 
 
+        self.fpv_counter += 1
+        if self.fpv_counter % 25 == 0:
+            fpv_rgb = cv2.cvtColor(fpv, cv2.COLOR_BGR2RGB)
+            rgb_image = Image.fromarray(fpv_rgb)
+            depth_info = self.depth_model.process_image(rgb_image)
+            print("depth_info: ", depth_info)
+
+        
+
+
+    
 
         
 
