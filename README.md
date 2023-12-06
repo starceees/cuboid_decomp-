@@ -40,3 +40,13 @@ git clone https://github.com/noahzn/Lite-Mono.git
 ```commandline
 python player.py
 ```
+
+### Implement
+## Find the camera rotation angle
+When game start: rotate 360 to find the angles between frames, must be continuous 360; if not, should restart the game
+
+logic: 
+1. Set the rotate_flag. 0: no totation; 1: rotate right (positive value); 2: rotate left (negative value).
+2. Rotate the camera 360 degrees, count the total frames captured in 360 degrees in radian.
+3. Calculate the rotation angle using self.rotate_angle = (self.frames_angle * len(self.fpv_frames)) % (2 * math.pi): Clockwise positive, counterclockwise negative.
+4. Get the camera rotation angle using self.camera_angle += self.rotate_angle.

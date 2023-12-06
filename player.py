@@ -3,6 +3,9 @@ import pygame
 import cv2
 import numpy as np
 import PIL.Image as Image
+from skimage.metrics import structural_similarity as compare_ssim
+import math
+
 
 
 from test_simple_modified import DepthModel
@@ -30,7 +33,17 @@ class KeyboardPlayerPyGame(Player):
 
         self.fpv_counter = 0  # Add a counter for fpv frames
 
+        self.camera_pos = np.array([0, 0, 0]) # x, y, theta
 
+        self.camera_angle = 0  # Initial orientation of the camera
+        self.rotate_flag = 0   # 0: no rotation, 1: rotate right, 2: rotate left
+        self.fpv_frames = []  # List of fpv frames
+        self.rotate_angle = 0  # Total rotation angle
+
+
+        self.initial_frame = None  # Store the initial frame for 360-degree rotation
+        self.frames_angle = 0
+        self.rotate_360 = True
 
         super(KeyboardPlayerPyGame, self).__init__()
 
@@ -66,7 +79,49 @@ class KeyboardPlayerPyGame(Player):
                 if event.key in self.keymap:
                     self.last_act ^= self.keymap[event.key]
 
+        # print("self.last_act: ", self.last_act)
+        if self.last_act == Action.RIGHT:
+            self.rotate_flag = 1
+        elif self.last_act == Action.LEFT:
+            self.rotate_flag = 2
+        else:
+            if len(self.fpv_frames) > 0:
+                print("length of self.fpv_frames = ", len(self.fpv_frames))
+                if self.rotate_flag == 1:
+                    self.rotate_angle = (self.frames_angle * len(self.fpv_frames)) % (2 * math.pi)
+                elif self.rotate_flag == 2:
+                    self.rotate_angle = - ((self.frames_angle * len(self.fpv_frames)) % (2 * math.pi))
+
+                self.camera_angle += self.rotate_angle
+                print("camera_angle = ", self.camera_angle)
+            self.fpv_frames = []
+            self.rotate_flag = 0
+    
         return self.last_act
+    
+    # Compare the similarity between two images
+    def are_images_similar(self, img1, img2):
+        gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+        score, _ = compare_ssim(gray1, gray2, full=True)
+        return score > 0.95  # If the similarity score is greater than 0.95, we consider the two images are similar
+
+    def record_fpv_frame(self):
+        if self.rotate_flag != 0:
+            # Only calculate onces
+            if self.rotate_360:
+                if self.initial_frame is None:
+                    self.initial_frame = self.fpv
+                else:
+                    if self.are_images_similar(self.initial_frame, self.fpv):
+                        print(f"Completed 360-degree rotation with {len(self.fpv_frames)} frames")
+                        self.frames_angle = 2 * math.pi / len(self.fpv_frames)  # Calculate the angle between each frame
+                        self.initial_frame = None  # Reset
+                        self.rotate_360 = False
+                        return
+                    
+            # Append the fpv frame to the list
+            self.fpv_frames.append(self.fpv)
 
 
     def show_target_images(self):
@@ -114,6 +169,9 @@ class KeyboardPlayerPyGame(Player):
 
         self.fpv = fpv
 
+
+        self.record_fpv_frame()
+
         
 
         if self.screen is None:
@@ -149,17 +207,8 @@ class KeyboardPlayerPyGame(Player):
             fpv_rgb = cv2.cvtColor(fpv, cv2.COLOR_BGR2RGB)
             rgb_image = Image.fromarray(fpv_rgb)
             depth_info = self.depth_model.process_image(rgb_image)
-            print("depth_info: ", depth_info)
-
-        
-
-
-    
-
-        
-
-
-
+            # print("depth_info: ", depth_info)
+            # print("depth_info: ", depth_info[0, 0])
 
 
 
