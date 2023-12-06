@@ -41,8 +41,8 @@ git clone https://github.com/noahzn/Lite-Mono.git
 python player.py
 ```
 
-### Implement
-## Find the camera rotation angle
+## Implement
+### Find the camera rotation angle
 When game start: rotate 360 to find the angles between frames, must be continuous 360; if not, should restart the game
 
 logic: 
