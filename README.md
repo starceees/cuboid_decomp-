@@ -50,3 +50,13 @@ logic:
 2. Rotate the camera 360 degrees, count the total frames captured in 360 degrees in radian.
 3. Calculate the rotation angle using self.rotate_angle = (self.frames_angle * len(self.fpv_frames)) % (2 * math.pi): Clockwise positive, counterclockwise negative.
 4. Get the camera rotation angle using self.camera_angle += self.rotate_angle.
+
+
+### Update the camera position
+1. Set the initial camera position (0, 0) in x y coordinate system
+2. -360 < theta < -180 = 0 < theta < 180; -180 < theta < 0  = 180 < theta < 360
+
+
+### if it is close to wall
+1. If there is a path, the mean depth in the central region of the depth map should larger than 0.9
+2. Try not to hit the camera back against the wall

@@ -33,7 +33,7 @@ class KeyboardPlayerPyGame(Player):
 
         self.fpv_counter = 0  # Add a counter for fpv frames
 
-        self.camera_pos = np.array([0, 0, 0]) # x, y, theta
+        self.camera_pos = np.array([0, 0]) # x, y
 
         self.camera_angle = 0  # Initial orientation of the camera
         self.rotate_flag = 0   # 0: no rotation, 1: rotate right, 2: rotate left
@@ -44,6 +44,12 @@ class KeyboardPlayerPyGame(Player):
         self.initial_frame = None  # Store the initial frame for 360-degree rotation
         self.frames_angle = 0
         self.rotate_360 = True
+
+        self.move_flag = 0  # 0: no movement, 1: move forward, 2: move backward
+        self.move_step = 0  # Total movement step
+
+        depth_info_shape = (1, 1, 192, 640)
+        self.depth_info = np.ones(depth_info_shape)
 
         super(KeyboardPlayerPyGame, self).__init__()
 
@@ -84,6 +90,10 @@ class KeyboardPlayerPyGame(Player):
             self.rotate_flag = 1
         elif self.last_act == Action.LEFT:
             self.rotate_flag = 2
+        elif self.last_act == Action.FORWARD:
+            self.move_flag = 1
+        elif self.last_act == Action.BACKWARD:
+            self.move_flag = 2
         else:
             if len(self.fpv_frames) > 0:
                 print("length of self.fpv_frames = ", len(self.fpv_frames))
@@ -94,10 +104,25 @@ class KeyboardPlayerPyGame(Player):
 
                 self.camera_angle += self.rotate_angle
                 print("camera_angle = ", self.camera_angle)
+            
+            if self.move_step > 0:
+                if self.move_flag == 1:
+                    self.camera_pos[0] += self.move_step * math.cos(self.camera_angle)
+                    self.camera_pos[1] += self.move_step * math.sin(self.camera_angle)
+                elif self.move_flag == 2:
+                    self.camera_pos[0] -= self.move_step * math.cos(self.camera_angle)
+                    self.camera_pos[1] -= self.move_step * math.sin(self.camera_angle)
+                print("camera position: ", self.camera_pos)
+
             self.fpv_frames = []
             self.rotate_flag = 0
-    
+
+            self.move_step = 0
+            self.move_flag = 0
+
         return self.last_act
+    
+    
     
     # Compare the similarity between two images
     def are_images_similar(self, img1, img2):
@@ -122,7 +147,11 @@ class KeyboardPlayerPyGame(Player):
                     
             # Append the fpv frame to the list
             self.fpv_frames.append(self.fpv)
-
+    
+    def record_move_step(self):
+        if self.move_flag != 0:
+            self.move_step += 1
+        
 
     def show_target_images(self):
         targets = self.get_target_images()
@@ -161,6 +190,16 @@ class KeyboardPlayerPyGame(Player):
         super(KeyboardPlayerPyGame, self).set_target_images(images)
         self.show_target_images()
 
+    def is_close_to_wall(self, depth_map, threshold=0.9):
+        # Analyze only the central region of the depth map
+        h, w = depth_map.shape[:2]
+        central_region = depth_map[int(h*0.4):int(h*0.6), int(w*0.4):int(w*0.6)]
+
+        # Calculate the mean depth in this central region
+        mean_depth = np.mean(central_region)
+        # print(f"Mean depth in the central region: {mean_depth}")
+
+        return mean_depth < threshold
 
 
     def see(self, fpv):
@@ -171,7 +210,7 @@ class KeyboardPlayerPyGame(Player):
 
 
         self.record_fpv_frame()
-
+            
         
 
         if self.screen is None:
@@ -203,13 +242,22 @@ class KeyboardPlayerPyGame(Player):
 
 
         self.fpv_counter += 1
+        
         if self.fpv_counter % 25 == 0:
             fpv_rgb = cv2.cvtColor(fpv, cv2.COLOR_BGR2RGB)
             rgb_image = Image.fromarray(fpv_rgb)
-            depth_info = self.depth_model.process_image(rgb_image)
+            self.depth_info = self.depth_model.process_image(rgb_image)
             # print("depth_info: ", depth_info)
             # print("depth_info: ", depth_info[0, 0])
 
+        
+        # Check if the camera is close to a wall
+        if self.is_close_to_wall(self.depth_info[0, 0]):
+            # print("Close to a wall! Stopping movement.")
+            self.move_flag = 0  # Stop movement if close to a wall
+
+        self.record_move_step()
+        # print("move flag: ", self.move_flag)
 
 
 if __name__ == "__main__":
