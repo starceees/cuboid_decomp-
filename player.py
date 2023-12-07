@@ -11,7 +11,7 @@ from test_simple_modified import DepthModel
 
 # Configuration for model
 config = {
-    'load_weights_folder': '/Users/tangxinran/Documents/NYU/robot_perception/project/LiteMono/weights',
+    'load_weights_folder': '/home/yash/Lite-Mono/weights',
     'model': 'lite-mono',
     'no_cuda': True,
 }
@@ -28,7 +28,7 @@ class KeyboardPlayerPyGame(Player):
         self.screen = None
         self.keymap = None
         self.target_image = None # The target image
-        self.depth_model = DepthModel(config)  # Create an instance of DepthModel
+        self.depth_model = DepthModel(config)  # Create an instance of DepthModel 
 
         self.fpv_counter = 0  # Add a counter for fpv frames
 
@@ -85,6 +85,7 @@ class KeyboardPlayerPyGame(Player):
         plt.draw()
         plt.pause(0.001)
 
+
     def act(self):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -97,6 +98,7 @@ class KeyboardPlayerPyGame(Player):
                     self.last_act |= self.keymap[event.key]
                 else:
                     self.show_target_images()
+
             if event.type == pygame.KEYUP:
                 if event.key in self.keymap:
                     self.last_act ^= self.keymap[event.key]
@@ -283,4 +285,3 @@ class KeyboardPlayerPyGame(Player):
 if __name__ == "__main__":
     import vis_nav_game
     vis_nav_game.play(the_player=KeyboardPlayerPyGame())
-
