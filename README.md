@@ -36,27 +36,30 @@ git clone https://github.com/noahzn/Lite-Mono.git
 3. Modify the system path of Lite-Mono in [test_simple_modified.py](./test_simple_modified.py) line 5
 
 
-## Run 
-```commandline
-python player.py
-```
-
-## Implement
+## Map generation
 ### Find the camera rotation angle
 When game start: rotate 360 to find the angles between frames, must be continuous 360; if not, should restart the game
 
 logic: 
-1. Set the rotate_flag. 0: no totation; 1: rotate right (positive value); 2: rotate left (negative value).
-2. Rotate the camera 360 degrees, count the total frames captured in 360 degrees in radian.
-3. Calculate the rotation angle using self.rotate_angle = (self.frames_angle * len(self.fpv_frames)) % (2 * math.pi): Clockwise positive, counterclockwise negative.
-4. Get the camera rotation angle using self.camera_angle += self.rotate_angle.
+1. Save frames when Action.LEFT or Action.RIGHT into self.fpv_frames
+2. Set the rotate_flag. 0: no totation; 1: rotate right (positive value); 2: rotate left (negative value).
+3. Rotate the camera 360 degrees, count the total frames captured in 360 degrees in radian.
+4. Calculate the rotation angle using self.rotate_angle = (self.frames_angle * len(self.fpv_frames)) % (2 * math.pi): Clockwise positive, counterclockwise negative.
+5. Get the camera rotation angle using self.camera_angle += self.rotate_angle.
 
 
 ### Update the camera position
-1. Set the initial camera position (0, 0) in x y coordinate system
-2. -360 < theta < -180 = 0 < theta < 180; -180 < theta < 0  = 180 < theta < 360
+1. Save number of steps when Action.FORWARD or Action.BACKWARD into self.move_step (set each step moves 1 meter)
+2. Set the initial camera position (0, 0) in x y coordinate system
+3. -360 < theta < -180 = 0 < theta < 180; -180 < theta < 0  = 180 < theta < 360
+4. Update camera position using polar coordinates
 
 
-### if it is close to wall
-1. If there is a path, the mean depth in the central region of the depth map should larger than 0.9
+### If it is close to wall
+1. If there is a path, the mean depth in the central region of the depth map should larger than 0.9. If it less than 0.9, set the self.move_flag = 0 
 2. Try not to hit the camera back against the wall
+
+## Run 
+```commandline
+python player.py
+```
