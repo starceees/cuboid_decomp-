@@ -5,8 +5,7 @@ import numpy as np
 import PIL.Image as Image
 from skimage.metrics import structural_similarity as compare_ssim
 import math
-
-
+import matplotlib.pyplot as plt
 
 from test_simple_modified import DepthModel
 
@@ -51,6 +50,12 @@ class KeyboardPlayerPyGame(Player):
         depth_info_shape = (1, 1, 192, 640)
         self.depth_info = np.ones(depth_info_shape)
 
+        self.positions = []  # To store camera positions
+        plt.ion()  # Turn on interactive mode for live updates
+        self.fig, self.ax = plt.subplots()  # Create a figure and axis for plotting
+        self.ax.set_xlim(-250, 250)
+        self.ax.set_ylim(-250, 250)
+
         super(KeyboardPlayerPyGame, self).__init__()
 
     def reset(self):
@@ -68,6 +73,17 @@ class KeyboardPlayerPyGame(Player):
             pygame.K_SPACE: Action.CHECKIN,
             pygame.K_ESCAPE: Action.QUIT
         }
+    
+    def update_plot(self):
+        # Update the plot with the new position
+        self.positions.append((self.camera_pos[0], self.camera_pos[1]))
+        x, y = zip(*self.positions)
+        self.ax.clear()
+        self.ax.plot(x, y, marker='o')
+        self.ax.set_xlim(-250, 250)
+        self.ax.set_ylim(-250, 250)
+        plt.draw()
+        plt.pause(0.001)
 
     def act(self):
         for event in pygame.event.get():
@@ -114,11 +130,15 @@ class KeyboardPlayerPyGame(Player):
                     self.camera_pos[1] -= self.move_step * math.sin(self.camera_angle)
                 print("camera position: ", self.camera_pos)
 
+                # Update the plot after changing position
+                self.update_plot()
+
             self.fpv_frames = []
             self.rotate_flag = 0
 
             self.move_step = 0
             self.move_flag = 0
+
 
         return self.last_act
     
