@@ -1,8 +1,8 @@
 from vis_nav_game import Player, Action
 import pygame
-import cv2
 import numpy as np
-import matplotlib.pyplot as plt
+import cv2
+
 
 class KeyboardPlayerPyGame(Player):
     def __init__(self):
@@ -10,8 +10,7 @@ class KeyboardPlayerPyGame(Player):
         self.last_act = Action.IDLE
         self.screen = None
         self.keymap = None
-        self.robot_pose = [0, 0, 90] 
-        self.robot_poses = []  # Store robot poses
+        self.target_image = None # The target image
         super(KeyboardPlayerPyGame, self).__init__()
 
     def reset(self):
@@ -45,48 +44,7 @@ class KeyboardPlayerPyGame(Player):
             if event.type == pygame.KEYUP:
                 if event.key in self.keymap:
                     self.last_act ^= self.keymap[event.key]
-
-        self.update_robot_pose()
-                    
         return self.last_act
-    
-    def update_robot_pose(self):
-        # Update robot pose based on actions
-        if self.last_act == Action.LEFT:
-            self.robot_pose[2] += 90  # Rotate 90 degrees counterclockwise
-        elif self.last_act == Action.RIGHT:
-            self.robot_pose[2] -= 90  # Rotate 90 degrees clockwise
-        elif self.last_act == Action.FORWARD:
-            self.robot_pose[0] += 0.1 * np.cos(np.deg2rad(self.robot_pose[2]))  # Move forward in x direction
-            self.robot_pose[1] += 0.1 * np.sin(np.deg2rad(self.robot_pose[2]))  # Move forward in y direction
-        elif self.last_act == Action.BACKWARD:
-            self.robot_pose[0] -= 0.1 * np.cos(np.deg2rad(self.robot_pose[2]))  # Move backward in x direction
-            self.robot_pose[1] -= 0.1 * np.sin(np.deg2rad(self.robot_pose[2]))  # Move backward in y direction
-
-        # Store robot pose
-        self.robot_poses.append(self.robot_pose.copy())
-
-    def display_path(self):
-        # Plot and display the robot path
-        x = [pose[0] for pose in self.robot_poses]
-        y = [pose[1] for pose in self.robot_poses]
-
-        plt.plot(x, y)
-        plt.xlabel('X')
-        plt.ylabel('Y')
-        plt.title('Robot Path')
-
-        # Display pose values
-        for i, pose in enumerate(self.robot_poses):
-            print(pose[0], pose[1])
-
-        start_pose = self.robot_poses[0]
-        end_pose = self.robot_poses[-1]
-        plt.plot(start_pose[0], start_pose[1], 'go', label='Start')
-        plt.plot(end_pose[0], end_pose[1], 'ro', label='End')
-        plt.legend()
-
-        plt.show()
 
     def show_target_images(self):
         targets = self.get_target_images()
@@ -103,6 +61,9 @@ class KeyboardPlayerPyGame(Player):
         concat_img = cv2.line(concat_img, (int(h/2), 0), (int(h/2), w), color, 2)
         concat_img = cv2.line(concat_img, (0, int(w/2)), (h, int(w/2)), color, 2)
 
+        # TODO: should we store the concat one or all the 4 images?
+        self.target_image = concat_img
+
         w_offset = 25
         h_offset = 10
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -111,9 +72,9 @@ class KeyboardPlayerPyGame(Player):
         stroke = 1
 
         cv2.putText(concat_img, 'Front View', (h_offset, w_offset), font, size, color, stroke, line)
-        cv2.putText(concat_img, 'Left View', (int(h/2) + h_offset, w_offset), font, size, color, stroke, line)
+        cv2.putText(concat_img, 'Right View', (int(h/2) + h_offset, w_offset), font, size, color, stroke, line)
         cv2.putText(concat_img, 'Back View', (h_offset, int(w/2) + w_offset), font, size, color, stroke, line)
-        cv2.putText(concat_img, 'Right View', (int(h/2) + h_offset, int(w/2) + w_offset), font, size, color, stroke, line)
+        cv2.putText(concat_img, 'Left View', (int(h/2) + h_offset, int(w/2) + w_offset), font, size, color, stroke, line)
 
         cv2.imshow(f'KeyboardPlayer:target_images', concat_img)
         cv2.waitKey(1)
@@ -121,6 +82,27 @@ class KeyboardPlayerPyGame(Player):
     def set_target_images(self, images):
         super(KeyboardPlayerPyGame, self).set_target_images(images)
         self.show_target_images()
+
+    def detect_walls(self, image):
+        # Convert the image to grayscale
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+        # Apply Gaussian blur to the grayscale image
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Use the Canny edge detection algorithm
+        edges = cv2.Canny(blurred, 50, 150)
+
+        # Invert the colors
+        inverted = 255 - edges
+
+
+        # Convert to 0s and 1s
+        binary_map = inverted // 255
+
+        # Return the inverted binary map
+        return binary_map
+        
 
     def see(self, fpv):
         if fpv is None or len(fpv.shape) < 3:
@@ -131,18 +113,6 @@ class KeyboardPlayerPyGame(Player):
         if self.screen is None:
             h, w, _ = fpv.shape
             self.screen = pygame.display.set_mode((w, h))
-
-        def convert_opencv_img_to_pygame(opencv_image):
-            opencv_image = opencv_image[:, :, ::-1]  # BGR->RGB
-            shape = opencv_image.shape[1::-1]  # (height,width,Number of colors) -> (width, height)
-            pygame_image = pygame.image.frombuffer(opencv_image.tobytes(), shape, 'RGB')
-
-            return pygame_image
-
-        pygame.display.set_caption("KeyboardPlayer:fpv")
-        rgb = convert_opencv_img_to_pygame(fpv)
-        self.screen.blit(rgb, (0, 0))
-        pygame.display.update()
 
         def convert_opencv_img_to_pygame(opencv_image):
             """
@@ -158,14 +128,18 @@ class KeyboardPlayerPyGame(Player):
 
         pygame.display.set_caption("KeyboardPlayer:fpv")
         rgb = convert_opencv_img_to_pygame(fpv)
+
         self.screen.blit(rgb, (0, 0))
         pygame.display.update()
 
+        # Generate a binary map of the walls
+        binary_map = self.detect_walls(fpv)
+
+        # Display the binary map
+        cv2.imshow('Binary Map', binary_map * 255)
+        cv2.waitKey(1)
+
+
 if __name__ == "__main__":
     import vis_nav_game
-
-    player = KeyboardPlayerPyGame()
-    vis_nav_game.play(the_player=player)
-
-    # Display the path after the game is finished
-    player.display_path()
+    vis_nav_game.play(the_player=KeyboardPlayerPyGame())
