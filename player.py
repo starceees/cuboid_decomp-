@@ -7,6 +7,7 @@ from skimage.metrics import structural_similarity as compare_ssim
 import math
 import matplotlib.pyplot as plt
 import time
+import concurrent.futures
 
 # from test_simple_modified import DepthModel
 
@@ -91,56 +92,121 @@ class KeyboardPlayerPyGame(Player):
             self.captured_images.append((camera_position, image))
             self.last_capture_time = current_time  # Update the last capture time
 
-    def compare_with_target_features(self):
-        # Load the target image
-        target_image = cv2.imread(self.target_image_path, cv2.IMREAD_GRAYSCALE)
-        orb = cv2.ORB_create()
+    # def compare_with_target_features(self):
+    #     # Load the target image
+    #     target_image = cv2.imread(self.target_image_path, cv2.IMREAD_GRAYSCALE)
+    #     orb = cv2.ORB_create()
 
-        # Initialize variables to track the best match
-        most_similar_image = None
-        highest_similarity = 0
-        most_similar_position = None
+    #     # Initialize variables to track the best match
+    #     most_similar_image = None
+    #     highest_similarity = 0
+    #     most_similar_position = None
 
-        # Extract features from the target image
-        target_keypoints, target_descriptors = orb.detectAndCompute(target_image, None)
+    #     # Extract features from the target image
+    #     target_keypoints, target_descriptors = orb.detectAndCompute(target_image, None)
 
-        for i, (camera_position, captured_image) in enumerate(self.captured_images):
-            # Extract features from the captured image
-            keypoints, descriptors = orb.detectAndCompute(captured_image, None)
+    #     for i, (camera_position, captured_image) in enumerate(self.captured_images):
+    #         # Extract features from the captured image
+    #         keypoints, descriptors = orb.detectAndCompute(captured_image, None)
 
-            # Create a BFMatcher (Brute Force Matcher) with Hamming distance
-            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    #         # Create a BFMatcher (Brute Force Matcher) with Hamming distance
+    #         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
-            # Match the descriptors
-            matches = bf.match(target_descriptors, descriptors)
+    #         # Match the descriptors
+    #         matches = bf.match(target_descriptors, descriptors)
 
-            matches = sorted(matches, key=lambda x: x.distance)
+    #         matches = sorted(matches, key=lambda x: x.distance)
 
-            # Calculate similarity based on the number of matches
-            similarity = 1 - (matches[0].distance / len(target_descriptors))
+    #         # Calculate similarity based on the number of matches
+    #         similarity = 1 - (matches[0].distance / len(target_descriptors))
 
-            if similarity > highest_similarity:
-                highest_similarity = similarity
-                most_similar_image = captured_image  # Store the most similar image
-                most_similar_position = camera_position
-                most_similar_index = i
+    #         if similarity > highest_similarity:
+    #             highest_similarity = similarity
+    #             most_similar_image = captured_image  # Store the most similar image
+    #             most_similar_position = camera_position
+    #             most_similar_index = i
 
-        if most_similar_image is not None:
-            print(f"The most similar image is found with a similarity of {highest_similarity}")
-            print(f"Index of matched image: {most_similar_index}")
-            print(f"Camera Position: {most_similar_position}")
-            self.most_similar_position = most_similar_position
-            self.find = True
-            cv2.putText(most_similar_image, f'Pose: {most_similar_position}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-            cv2.imshow("Target Image", target_image)
-            cv2.imshow("Matched Captured Image", most_similar_image)  # Display the most similar image
-            cv2.waitKey(0)
+    #     if most_similar_image is not None:
+    #         print(f"The most similar image is found with a similarity of {highest_similarity}")
+    #         print(f"Index of matched image: {most_similar_index}")
+    #         print(f"Camera Position: {most_similar_position}")
+    #         self.most_similar_position = most_similar_position
+    #         self.find = True
+    #         cv2.putText(most_similar_image, f'Pose: {most_similar_position}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    #         cv2.imshow("Target Image", target_image)
+    #         cv2.imshow("Matched Captured Image", most_similar_image)  # Display the most similar image
+    #         cv2.waitKey(0)
 
             
+    #     else:
+    #         print("No similar image found in the dataset.")
+
+
+
+
+
+
+
+
+
+
+
+
+    def compare_image(self, target_details, captured_details):
+        target_image, target_keypoints, target_descriptors = target_details
+        camera_position, captured_image = captured_details
+        orb = cv2.ORB_create()
+
+        # Extract features from the captured image
+        keypoints, descriptors = orb.detectAndCompute(captured_image, None)
+
+        # Create a BFMatcher (Brute Force Matcher) with Hamming distance
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+        # Match the descriptors
+        matches = bf.match(target_descriptors, descriptors)
+        matches = sorted(matches, key=lambda x: x.distance)
+
+        # Calculate similarity based on the number of matches
+        similarity = 1 - (matches[0].distance / len(target_descriptors)) if matches else 0
+
+        # Convert camera_position to a tuple if it's an array
+        camera_position_tuple = tuple(camera_position.flatten()) if isinstance(camera_position, np.ndarray) else camera_position
+
+        return similarity, camera_position_tuple, captured_image
+
+    def compare_with_target_features(self):
+        # Load the target images
+        target_images = [cv2.imread(f'target_temp_{i}.png', cv2.IMREAD_GRAYSCALE) for i in range(4)]
+        orb = cv2.ORB_create()
+
+        # Extract features from each target image
+        target_details = [(img, *orb.detectAndCompute(img, None)) for img in target_images]
+
+        similarities = []
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Iterate over each target image and submit comparison tasks
+            for target_detail in target_details:
+                futures = [executor.submit(self.compare_image, target_detail, details) for details in self.captured_images]
+                similarities.append({future.result()[1]: future.result()[0] for future in concurrent.futures.as_completed(futures)})
+
+        # Find positions where all four images have high similarity
+        high_similarity_positions = []
+        for pos in similarities[0]:
+            if all(pos in s and s[pos] > 0.8 for s in similarities):  # Adjust the threshold as needed
+                high_similarity_positions.append(pos)
+
+        # Output results
+        if high_similarity_positions:
+            print("High similarity positions:", high_similarity_positions)
         else:
-            print("No similar image found in the dataset.")
+            print("No positions found with high similarity across all four images.")
+
+
+
+
     
-    
+
     def update_plot(self):
         # Append the new position
         self.positions.append((self.camera_pos[0], self.camera_pos[1]))
@@ -291,7 +357,8 @@ class KeyboardPlayerPyGame(Player):
         # TODO: should we store the concat one or all the 4 images?
         self.target_image = concat_img
 
-        selected_target = targets[0]
+        # selected_target = targets[0]
+        selected_target = targets
 
         w_offset = 25
         h_offset = 10
@@ -308,8 +375,11 @@ class KeyboardPlayerPyGame(Player):
         cv2.imshow(f'KeyboardPlayer:target_images', concat_img)
         cv2.waitKey(1)
 
-        self.target_image_path = 'target_temp.png'
-        cv2.imwrite(self.target_image_path, selected_target)
+        # self.target_image_path = 'target_temp.png'
+        # cv2.imwrite(self.target_image_path, selected_target)
+        for i, image in enumerate(selected_target):
+            self.target_image_path = f'target_temp_{i}.png'  # Create a unique file name for each image
+            cv2.imwrite(self.target_image_path, image)
 
     def set_target_images(self, images):
         super(KeyboardPlayerPyGame, self).set_target_images(images)
