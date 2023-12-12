@@ -145,17 +145,23 @@ class KeyboardPlayerPyGame(Player):
         self.positions.append((self.camera_pos[0], self.camera_pos[1]))
         x, y = zip(*self.positions)
         self.ax.clear()
-        self.ax.plot(x, y, marker='o')
-        self.ax.set_xlim(-250, 250)
-        self.ax.set_ylim(-250, 250)
+        if self.marker_colour == True:
+            self.ax.plot(x, y, marker='ro')
+        else:
+            self.ax.plot(x, y, marker='o')
+
+        self.ax.set_xlim(-80, 80)
+        self.ax.set_ylim(-80, 80)
         plt.draw()
         plt.pause(0.001)
 
     
     def pre_exploration(self):
+        self.marker_colour = False
         self.store_captured_images_flag = True
 
     def pre_navigation(self):
+        self.marker_colour = True
         self.store_captured_images_flag = False
 
 
