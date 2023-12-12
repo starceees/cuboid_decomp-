@@ -6,6 +6,7 @@ import PIL.Image as Image
 from skimage.metrics import structural_similarity as compare_ssim
 import math
 import matplotlib.pyplot as plt
+import time
 
 from test_simple_modified import DepthModel
 
@@ -28,7 +29,12 @@ class KeyboardPlayerPyGame(Player):
         self.screen = None
         self.keymap = None
         self.target_image = None # The target image
-        self.depth_model = DepthModel(config)  # Create an instance of DepthModel 
+        self.depth_model = DepthModel(config)  # Create an instance of DepthModel
+        self.target_image = None # The target image
+        self.captured_images = []
+
+        self.time_interval = 5  # Time interval in seconds to save images
+        self.last_capture_time = time.time()
 
         self.fpv_counter = 0  # Add a counter for fpv frames
 
@@ -73,6 +79,65 @@ class KeyboardPlayerPyGame(Player):
             pygame.K_SPACE: Action.CHECKIN,
             pygame.K_ESCAPE: Action.QUIT
         }
+
+    def store_captured_image(self, image, camera_position):
+        # Store the entire captured image
+        current_time = time.time()
+        time_elapsed = current_time - self.last_capture_time
+
+        # Check if the time interval has elapsed
+        if time_elapsed >= self.time_interval:
+            self.captured_images.append((camera_position, image))
+            self.last_capture_time = current_time  # Update the last capture time
+
+    def compare_with_target_features(self):
+        # Load the target image
+        target_image = cv2.imread(self.target_image_path, cv2.IMREAD_GRAYSCALE)
+        orb = cv2.ORB_create()
+
+        # Initialize variables to track the best match
+        most_similar_image = None
+        highest_similarity = 0
+        most_similar_position = None
+
+        # Extract features from the target image
+        target_keypoints, target_descriptors = orb.detectAndCompute(target_image, None)
+
+        for i, (camera_position, captured_image) in enumerate(self.captured_images):
+            # Extract features from the captured image
+            keypoints, descriptors = orb.detectAndCompute(captured_image, None)
+
+            # Create a BFMatcher (Brute Force Matcher) with Hamming distance
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+            # Match the descriptors
+            matches = bf.match(target_descriptors, descriptors)
+
+            matches = sorted(matches, key=lambda x: x.distance)
+
+            # Calculate similarity based on the number of matches
+            similarity = 1 - (matches[0].distance / len(target_descriptors))
+
+            if similarity > highest_similarity:
+                highest_similarity = similarity
+                most_similar_image = captured_image  # Store the most similar image
+                most_similar_position = camera_position
+                most_similar_index = i
+
+        if most_similar_image is not None:
+            print(f"The most similar image is found with a similarity of {highest_similarity}")
+            print(f"Index of matched image: {most_similar_index}")
+            print(f"Camera Position: {most_similar_position}")
+            self.most_similar_position = most_similar_position
+            self.find = True
+            cv2.putText(most_similar_image, f'Pose: {most_similar_position}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.imshow("Target Image", target_image)
+            cv2.imshow("Matched Captured Image", most_similar_image)  # Display the most similar image
+            cv2.waitKey(0)
+
+            
+        else:
+            print("No similar image found in the dataset.")
     
     def update_plot(self):
         # Update the plot with the new position
@@ -85,6 +150,13 @@ class KeyboardPlayerPyGame(Player):
         plt.draw()
         plt.pause(0.001)
 
+    
+    def pre_exploration(self):
+        self.store_captured_images_flag = True
+
+    def pre_navigation(self):
+        self.store_captured_images_flag = False
+
 
     def act(self):
         for event in pygame.event.get():
@@ -96,8 +168,11 @@ class KeyboardPlayerPyGame(Player):
             if event.type == pygame.KEYDOWN:
                 if event.key in self.keymap:
                     self.last_act |= self.keymap[event.key]
+                    if event.key == pygame.K_ESCAPE:
+                        self.camera_pos = np.array([0, 0]) # x, y
                 else:
                     self.show_target_images()
+                    self.compare_with_target_features()
 
             if event.type == pygame.KEYUP:
                 if event.key in self.keymap:
@@ -193,6 +268,8 @@ class KeyboardPlayerPyGame(Player):
         # TODO: should we store the concat one or all the 4 images?
         self.target_image = concat_img
 
+        selected_target = targets[0]
+
         w_offset = 25
         h_offset = 10
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -207,6 +284,9 @@ class KeyboardPlayerPyGame(Player):
 
         cv2.imshow(f'KeyboardPlayer:target_images', concat_img)
         cv2.waitKey(1)
+
+        self.target_image_path = 'target_temp.png'
+        cv2.imwrite(self.target_image_path, selected_target)
 
     def set_target_images(self, images):
         super(KeyboardPlayerPyGame, self).set_target_images(images)
@@ -238,6 +318,9 @@ class KeyboardPlayerPyGame(Player):
         if self.screen is None:
             h, w, _ = fpv.shape
             self.screen = pygame.display.set_mode((w, h))
+
+        if self.store_captured_images_flag: 
+            self.store_captured_image(self.fpv, self.camera_pos)
         
 
         
@@ -260,6 +343,12 @@ class KeyboardPlayerPyGame(Player):
         rgb = convert_opencv_img_to_pygame(fpv)
 
         self.screen.blit(rgb, (0, 0))
+
+        # Display robot pose
+        font = pygame.font.Font(None, 36)
+        text = font.render(f'Pose: {self.camera_pos}', True, (0, 0, 255))
+        self.screen.blit(text, (10, 10))
+        
         pygame.display.update()
 
 
