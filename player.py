@@ -8,14 +8,14 @@ import math
 import matplotlib.pyplot as plt
 import time
 
-from test_simple_modified import DepthModel
+# from test_simple_modified import DepthModel
 
 # Configuration for model
-config = {
-    'load_weights_folder': '/Users/tangxinran/Documents/NYU/robot_perception/project/LiteMono/weights',
-    'model': 'lite-mono',
-    'no_cuda': True,
-}
+# config = {
+#     'load_weights_folder': '/Users/tangxinran/Documents/NYU/robot_perception/project/LiteMono/weights',
+#     'model': 'lite-mono',
+#     'no_cuda': True,
+# }
 
 # Camera intrinsic matrix
 camera_matrix = np.array([[92., 0, 160.], [0, 92., 120.], [0, 0, 1]])
@@ -29,7 +29,7 @@ class KeyboardPlayerPyGame(Player):
         self.screen = None
         self.keymap = None
         self.target_image = None # The target image
-        self.depth_model = DepthModel(config)  # Create an instance of DepthModel
+        # self.depth_model = DepthModel(config)  # Create an instance of DepthModel
         self.target_image = None # The target image
         self.captured_images = []
 
@@ -173,17 +173,8 @@ class KeyboardPlayerPyGame(Player):
                         self.camera_pos = np.array([0, 0]) # x, y
 
                         self.camera_angle = 0  # Initial orientation of the camera
-                        self.rotate_flag = 0   # 0: no rotation, 1: rotate right, 2: rotate left
-                        self.fpv_frames = []  # List of fpv frames
                         self.rotate_angle = 0  # Total rotation angle
 
-
-                        # self.initial_frame = None  # Store the initial frame for 360-degree rotation
-                        self.frames_angle = 0
-                        self.rotate_360 = True
-
-                        self.move_flag = 0  # 0: no movement, 1: move forward, 2: move backward
-                        self.move_step = 0  # Total movement step
                 else:
                     self.show_target_images()
                     self.compare_with_target_features()
@@ -243,6 +234,7 @@ class KeyboardPlayerPyGame(Player):
         return score > 0.95  # If the similarity score is greater than 0.95, we consider the two images are similar
 
     def record_fpv_frame(self):
+        
         if self.rotate_flag != 0:
             # Only calculate onces
             if self.rotate_360:
@@ -252,7 +244,7 @@ class KeyboardPlayerPyGame(Player):
                     if self.are_images_similar(self.initial_frame, self.fpv) and len(self.fpv_frames) > 100:
                         print(f"Completed 360-degree rotation with {len(self.fpv_frames)} frames")
                         self.frames_angle = 2 * math.pi / len(self.fpv_frames)  # Calculate the angle between each frame
-                        # self.initial_frame = None  # Reset
+                        self.initial_frame = None  # Reset
                         self.rotate_360 = False
                         return
                     
