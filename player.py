@@ -92,123 +92,160 @@ class KeyboardPlayerPyGame(Player):
             self.captured_images.append((camera_position, image))
             self.last_capture_time = current_time  # Update the last capture time
 
-    # def compare_with_target_features(self):
-    #     # Load the target image
-    #     target_image = cv2.imread(self.target_image_path, cv2.IMREAD_GRAYSCALE)
-    #     orb = cv2.ORB_create()
+    def compare_with_target_features(self):
+        # Load the target image
+        target_image = cv2.imread(self.target_image_path, cv2.IMREAD_GRAYSCALE)
+        orb = cv2.ORB_create()
 
-    #     # Initialize variables to track the best match
-    #     most_similar_image = None
-    #     highest_similarity = 0
-    #     most_similar_position = None
+        # Initialize variables to track the best match
+        most_similar_image = None
+        highest_similarity = 0
+        most_similar_position = None
 
-    #     # Extract features from the target image
-    #     target_keypoints, target_descriptors = orb.detectAndCompute(target_image, None)
+        # Extract features from the target image
+        target_keypoints, target_descriptors = orb.detectAndCompute(target_image, None)
 
-    #     for i, (camera_position, captured_image) in enumerate(self.captured_images):
-    #         # Extract features from the captured image
-    #         keypoints, descriptors = orb.detectAndCompute(captured_image, None)
+        for i, (camera_position, captured_image) in enumerate(self.captured_images):
+            # Extract features from the captured image
+            keypoints, descriptors = orb.detectAndCompute(captured_image, None)
 
-    #         # Create a BFMatcher (Brute Force Matcher) with Hamming distance
-    #         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+            # Create a BFMatcher (Brute Force Matcher) with Hamming distance
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
-    #         # Match the descriptors
-    #         matches = bf.match(target_descriptors, descriptors)
+            # Match the descriptors
+            matches = bf.match(target_descriptors, descriptors)
 
-    #         matches = sorted(matches, key=lambda x: x.distance)
+            matches = sorted(matches, key=lambda x: x.distance)
 
-    #         # Calculate similarity based on the number of matches
-    #         similarity = 1 - (matches[0].distance / len(target_descriptors))
+            # Calculate similarity based on the number of matches
+            similarity = 1 - (matches[0].distance / len(target_descriptors))
 
-    #         if similarity > highest_similarity:
-    #             highest_similarity = similarity
-    #             most_similar_image = captured_image  # Store the most similar image
-    #             most_similar_position = camera_position
-    #             most_similar_index = i
+            if similarity > highest_similarity:
+                highest_similarity = similarity
+                most_similar_image = captured_image  # Store the most similar image
+                most_similar_position = camera_position
+                most_similar_index = i
 
-    #     if most_similar_image is not None:
-    #         print(f"The most similar image is found with a similarity of {highest_similarity}")
-    #         print(f"Index of matched image: {most_similar_index}")
-    #         print(f"Camera Position: {most_similar_position}")
-    #         self.most_similar_position = most_similar_position
-    #         self.find = True
-    #         cv2.putText(most_similar_image, f'Pose: {most_similar_position}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-    #         cv2.imshow("Target Image", target_image)
-    #         cv2.imshow("Matched Captured Image", most_similar_image)  # Display the most similar image
-    #         cv2.waitKey(0)
+        if most_similar_image is not None:
+            print(f"The most similar image is found with a similarity of {highest_similarity}")
+            print(f"Index of matched image: {most_similar_index}")
+            print(f"Camera Position: {most_similar_position}")
+            self.most_similar_position = most_similar_position
+            self.find = True
+            cv2.putText(most_similar_image, f'Pose: {most_similar_position}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            cv2.imshow("Target Image", target_image)
+            cv2.imshow("Matched Captured Image", most_similar_image)  # Display the most similar image
+            cv2.waitKey(0)
 
             
-    #     else:
-    #         print("No similar image found in the dataset.")
-
-    def compare_image(self, target_details, captured_details):
-        target_image, target_keypoints, target_descriptors = target_details
-        camera_position, captured_image = captured_details
-        orb = cv2.ORB_create()
-
-        # Extract features from the captured image
-        keypoints, descriptors = orb.detectAndCompute(captured_image, None)
-
-        # Create a BFMatcher (Brute Force Matcher) with Hamming distance
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-
-        # Match the descriptors
-        matches = bf.match(target_descriptors, descriptors)
-        matches = sorted(matches, key=lambda x: x.distance)
-
-        # Calculate similarity based on the number of matches
-        similarity = 1 - (matches[0].distance / len(target_descriptors)) if matches else 0
-
-        # Convert camera_position to a tuple if it's an array
-        camera_position_tuple = tuple(camera_position.flatten()) if isinstance(camera_position, np.ndarray) else camera_position
-
-        return similarity, camera_position_tuple, captured_image
-
-    def compare_with_target_features(self):
-
-        # Store the most similar images for each target
-        most_similar_images = []
-        # Load the target images
-        target_images = [cv2.imread(f'target_temp_{i}.png', cv2.IMREAD_GRAYSCALE) for i in range(4)]
-        orb = cv2.ORB_create()
-
-        # Extract features from each target image
-        target_details = [(img, *orb.detectAndCompute(img, None)) for img in target_images]
-
-        similarities = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            # Iterate over each target image and submit comparison tasks
-            for target_detail in target_details:
-                futures = [executor.submit(self.compare_image, target_detail, details) for details in self.captured_images]
-                similarities.append({future.result()[1]: future.result()[0] for future in concurrent.futures.as_completed(futures)})
-
-        # Find positions where all four images have high similarity
-         #Find positions where all four images have high similarity
-        high_similarity_positions = []
-        for pos in similarities[0]:
-            if all(pos in s and s[pos] > 0.8 for s in similarities):  # Adjust the threshold as needed
-                high_similarity_positions.append(pos)
-
-        # Output results and display images
-        if high_similarity_positions:
-            print("High similarity positions:", high_similarity_positions)
-
-            for pos in high_similarity_positions:
-                for i, s in enumerate(similarities):
-                    # Check if the position exists in the similarity dictionary
-                    if pos in s:
-                        similarity_score = s[pos]
-                        # Find the original index for the position
-                        original_index = next((index for index, details in enumerate(self.captured_images) if tuple(details[0].flatten()) == pos), None)
-                        if original_index is not None:
-                            captured_image = self.captured_images[original_index][1]
-                            cv2.imshow(f"Target {i+1} - Matched Image", captured_image)
-                
-            cv2.waitKey(0)  # Wait for a key press to close the images
-            cv2.destroyAllWindows()  # Close all OpenCV windows
         else:
-            print("No positions found with high similarity across all four images.")
+            print("No similar image found in the dataset.")
+
+    # def compare_image(self, target_details, captured_details):
+    #     target_image, target_keypoints, target_descriptors = target_details
+    #     camera_position, captured_image = captured_details
+    #     orb = cv2.ORB_create()
+
+    #     # Extract features from the captured image
+    #     keypoints, descriptors = orb.detectAndCompute(captured_image, None)
+
+    #     # Create a BFMatcher (Brute Force Matcher) with Hamming distance
+    #     bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+    #     # Match the descriptors
+    #     matches = bf.match(target_descriptors, descriptors)
+    #     matches = sorted(matches, key=lambda x: x.distance)
+
+    #     # Calculate similarity based on the number of matches
+    #     similarity = 1 - (matches[0].distance / len(target_descriptors)) if matches else 0
+
+    #     # Convert camera_position to a tuple if it's an array
+    #     camera_position_tuple = tuple(camera_position.flatten()) if isinstance(camera_position, np.ndarray) else camera_position
+
+    #     return similarity, camera_position_tuple, captured_image
+
+    # def compare_with_target_features(self):
+
+    #     # Store the most similar images for each target
+    #     most_similar_images = []
+    #     # Load the target images
+    #     target_images = [cv2.imread(f'target_temp_{i}.png', cv2.IMREAD_GRAYSCALE) for i in range(4)]
+    #     orb = cv2.ORB_create()
+
+    #     # Extract features from each target image
+    #     target_details = [(img, *orb.detectAndCompute(img, None)) for img in target_images]
+
+    #     similarities = []
+    #     with concurrent.futures.ThreadPoolExecutor() as executor:
+    #         # Iterate over each target image and submit comparison tasks
+    #         for target_detail in target_details:
+    #             futures = [executor.submit(self.compare_image, target_detail, details) for details in self.captured_images]
+    #             similarities.append({future.result()[1]: future.result()[0] for future in concurrent.futures.as_completed(futures)})
+
+    #     # Find positions where all four images have high similarity
+    #      #Find positions where all four images have high similarity
+    #     high_similarity_positions = []
+    #     for pos in similarities[0]:
+    #         if all(pos in s and s[pos] > 0.8 for s in similarities):  # Adjust the threshold as needed
+    #             high_similarity_positions.append(pos)
+
+    #     # Output results and display images
+    #     if high_similarity_positions:
+    #         print("High similarity positions:", high_similarity_positions)
+
+    #         # Convert each position to a tuple for comparison
+    #         position_tuple = high_similarity_positions
+
+    #         for position, image in self.captured_images:
+    #             # print("position: ", position)
+    #             # print("position_tuple: ", position_tuple)
+                
+    #             if position_tuple[0] == tuple(position):
+    #                 # Display the image if the position matches
+    #                 cv2.imshow(f"Image at Position {position}", image)
+    #                 cv2.waitKey(0)
+    #                 cv2.destroyAllWindows()
+    #     else:
+    #         print("No positions found with high similarity across all four images.")
     
+    # def update_plot(self):
+    #     # Append the new position
+    #     self.positions.append((self.camera_pos[0], self.camera_pos[1]))
+
+    #     # Clear only if there are no points to retain the color of previous points
+    #     if not self.positions:
+    #         self.ax.clear()
+
+    #     # Plot each point except the last one
+    #     for i in range(len(self.positions) - 1):
+    #         if not self.marker_colour:
+    #             pos = self.positions[i]
+    #             next_pos = self.positions[i + 1]
+    #             self.ax.plot([pos[0], next_pos[0]], [pos[1], next_pos[1]], marker='o', color="red")  # Line connecting points in red
+    #             self.ax.plot(pos[0], pos[1], marker='o', color="red")  # Plot each point in red
+
+
+    #     # Plot each point except the last one
+    #     for pos in self.positions[:-1]:
+    #         self.ax.plot(pos[0], pos[1], marker='o', color="red")  # Plot in red
+
+    #     if self.marker_colour:
+    #         # Plot the last point in blue if marker_colour is True
+    #         self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="blue")
+    #     else:
+    #         # Plot the last point in red if marker_colour is False
+    #         self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="black")
+
+    #     # Check if there are at least two points to differentiate the start and end
+    #     if len(self.positions) >= 2:
+    #         # Plot the starting point in green
+    #         self.ax.plot(self.positions[0][0], self.positions[0][1], marker='o', color="green")
+
+    #     self.ax.set_xlim(-80, 80)
+    #     self.ax.set_ylim(-80, 80)
+    #     plt.draw()
+    #     plt.pause(0.001)
+
     def update_plot(self):
         # Append the new position
         self.positions.append((self.camera_pos[0], self.camera_pos[1]))
@@ -217,7 +254,7 @@ class KeyboardPlayerPyGame(Player):
         if not self.positions:
             self.ax.clear()
 
-        # Plot each point except the last one
+        # Plot each point except the last one and connect them with lines
         for i in range(len(self.positions) - 1):
             if not self.marker_colour:
                 pos = self.positions[i]
@@ -225,27 +262,24 @@ class KeyboardPlayerPyGame(Player):
                 self.ax.plot([pos[0], next_pos[0]], [pos[1], next_pos[1]], marker='o', color="red")  # Line connecting points in red
                 self.ax.plot(pos[0], pos[1], marker='o', color="red")  # Plot each point in red
 
-
-        # Plot each point except the last one
-        for pos in self.positions[:-1]:
-            self.ax.plot(pos[0], pos[1], marker='o', color="red")  # Plot in red
-
-        if self.marker_colour:
-            # Plot the last point in blue if marker_colour is True
-            self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="blue")
-        else:
-            # Plot the last point in red if marker_colour is False
-            self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="black")
-
         # Check if there are at least two points to differentiate the start and end
         if len(self.positions) >= 2:
             # Plot the starting point in green
             self.ax.plot(self.positions[0][0], self.positions[0][1], marker='o', color="green")
 
+        # Plot the last point with a black marker
+        if self.marker_colour:
+            # Plot the last point in blue if marker_colour is True
+            self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="blue")
+        else:
+            # Plot the last point in black if marker_colour is False
+            self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="black")
+
         self.ax.set_xlim(-80, 80)
         self.ax.set_ylim(-80, 80)
         plt.draw()
         plt.pause(0.001)
+
 
 
 
