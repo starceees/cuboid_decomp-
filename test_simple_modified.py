@@ -2,7 +2,7 @@ from __future__ import absolute_import, division, print_function
 
 # Add the path to the LiteMono folder
 import sys
-sys.path.insert(0, '/home/yash/Lite-Mono')
+sys.path.insert(0, '/Users/tangxinran/Documents/NYU/robot_perception/project/LiteMono')
 
 import os
 import numpy as np

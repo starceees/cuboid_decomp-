@@ -11,7 +11,7 @@ from test_simple_modified import DepthModel
 
 # Configuration for model
 config = {
-    'load_weights_folder': '/home/yash/Lite-Mono/weights',
+    'load_weights_folder': '/Users/tangxinran/Documents/NYU/robot_perception/project/LiteMono/weights',
     'model': 'lite-mono',
     'no_cuda': True,
 }

@@ -12,7 +12,7 @@ from test_simple_modified import DepthModel
 
 # Configuration for model
 config = {
-    'load_weights_folder': '/home/yash/Lite-Mono/weights',
+    'load_weights_folder': '/Users/tangxinran/Documents/NYU/robot_perception/project/LiteMono/weights',
     'model': 'lite-mono',
     'no_cuda': True,
 }
@@ -80,6 +80,7 @@ class KeyboardPlayerPyGame(Player):
             pygame.K_ESCAPE: Action.QUIT
         }
 
+    # Store the images and positions every 5 seconds
     def store_captured_image(self, image, camera_position):
         # Store the entire captured image
         current_time = time.time()
@@ -170,6 +171,19 @@ class KeyboardPlayerPyGame(Player):
                     self.last_act |= self.keymap[event.key]
                     if event.key == pygame.K_ESCAPE:
                         self.camera_pos = np.array([0, 0]) # x, y
+
+                        self.camera_angle = 0  # Initial orientation of the camera
+                        self.rotate_flag = 0   # 0: no rotation, 1: rotate right, 2: rotate left
+                        self.fpv_frames = []  # List of fpv frames
+                        self.rotate_angle = 0  # Total rotation angle
+
+
+                        # self.initial_frame = None  # Store the initial frame for 360-degree rotation
+                        self.frames_angle = 0
+                        self.rotate_360 = True
+
+                        self.move_flag = 0  # 0: no movement, 1: move forward, 2: move backward
+                        self.move_step = 0  # Total movement step
                 else:
                     self.show_target_images()
                     self.compare_with_target_features()
@@ -235,10 +249,10 @@ class KeyboardPlayerPyGame(Player):
                 if self.initial_frame is None:
                     self.initial_frame = self.fpv
                 else:
-                    if self.are_images_similar(self.initial_frame, self.fpv):
+                    if self.are_images_similar(self.initial_frame, self.fpv) and len(self.fpv_frames) > 100:
                         print(f"Completed 360-degree rotation with {len(self.fpv_frames)} frames")
                         self.frames_angle = 2 * math.pi / len(self.fpv_frames)  # Calculate the angle between each frame
-                        self.initial_frame = None  # Reset
+                        # self.initial_frame = None  # Reset
                         self.rotate_360 = False
                         return
                     
@@ -354,18 +368,18 @@ class KeyboardPlayerPyGame(Player):
 
         self.fpv_counter += 1
         
-        if self.fpv_counter % 25 == 0:
-            fpv_rgb = cv2.cvtColor(fpv, cv2.COLOR_BGR2RGB)
-            rgb_image = Image.fromarray(fpv_rgb)
-            self.depth_info = self.depth_model.process_image(rgb_image)
+        # if self.fpv_counter % 25 == 0:
+        #     fpv_rgb = cv2.cvtColor(fpv, cv2.COLOR_BGR2RGB)
+        #     rgb_image = Image.fromarray(fpv_rgb)
+        #     self.depth_info = self.depth_model.process_image(rgb_image)
             # print("depth_info: ", depth_info)
             # print("depth_info: ", depth_info[0, 0])
 
         
         # Check if the camera is close to a wall
-        if self.is_close_to_wall(self.depth_info[0, 0]):
-            # print("Close to a wall! Stopping movement.")
-            self.move_flag = 0  # Stop movement if close to a wall
+        # if self.is_close_to_wall(self.depth_info[0, 0]):
+        #     # print("Close to a wall! Stopping movement.")
+        #     self.move_flag = 0  # Stop movement if close to a wall
 
         self.record_move_step()
         # print("move flag: ", self.move_flag)
