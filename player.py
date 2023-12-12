@@ -141,17 +141,6 @@ class KeyboardPlayerPyGame(Player):
     #     else:
     #         print("No similar image found in the dataset.")
 
-
-
-
-
-
-
-
-
-
-
-
     def compare_image(self, target_details, captured_details):
         target_image, target_keypoints, target_descriptors = target_details
         camera_position, captured_image = captured_details
@@ -176,6 +165,9 @@ class KeyboardPlayerPyGame(Player):
         return similarity, camera_position_tuple, captured_image
 
     def compare_with_target_features(self):
+
+        # Store the most similar images for each target
+        most_similar_images = []
         # Load the target images
         target_images = [cv2.imread(f'target_temp_{i}.png', cv2.IMREAD_GRAYSCALE) for i in range(4)]
         orb = cv2.ORB_create()
@@ -191,22 +183,32 @@ class KeyboardPlayerPyGame(Player):
                 similarities.append({future.result()[1]: future.result()[0] for future in concurrent.futures.as_completed(futures)})
 
         # Find positions where all four images have high similarity
+         #Find positions where all four images have high similarity
         high_similarity_positions = []
         for pos in similarities[0]:
             if all(pos in s and s[pos] > 0.8 for s in similarities):  # Adjust the threshold as needed
                 high_similarity_positions.append(pos)
 
-        # Output results
+        # Output results and display images
         if high_similarity_positions:
             print("High similarity positions:", high_similarity_positions)
+
+            for pos in high_similarity_positions:
+                for i, s in enumerate(similarities):
+                    # Check if the position exists in the similarity dictionary
+                    if pos in s:
+                        similarity_score = s[pos]
+                        # Find the original index for the position
+                        original_index = next((index for index, details in enumerate(self.captured_images) if tuple(details[0].flatten()) == pos), None)
+                        if original_index is not None:
+                            captured_image = self.captured_images[original_index][1]
+                            cv2.imshow(f"Target {i+1} - Matched Image", captured_image)
+                
+            cv2.waitKey(0)  # Wait for a key press to close the images
+            cv2.destroyAllWindows()  # Close all OpenCV windows
         else:
             print("No positions found with high similarity across all four images.")
-
-
-
-
     
-
     def update_plot(self):
         # Append the new position
         self.positions.append((self.camera_pos[0], self.camera_pos[1]))
@@ -215,21 +217,36 @@ class KeyboardPlayerPyGame(Player):
         if not self.positions:
             self.ax.clear()
 
-        # Plot each point
-        for pos in self.positions[:-1]:  # Plot all but the last point in red
-            self.ax.plot(pos[0], pos[1], marker='o', color="red")
+        # Plot each point except the last one
+        for i in range(len(self.positions) - 1):
+            if not self.marker_colour:
+                pos = self.positions[i]
+                next_pos = self.positions[i + 1]
+                self.ax.plot([pos[0], next_pos[0]], [pos[1], next_pos[1]], marker='o', color="red")  # Line connecting points in red
+                self.ax.plot(pos[0], pos[1], marker='o', color="red")  # Plot each point in red
 
-        if self.marker_colour == True:
-            # Plot the last point in blue
+
+        # Plot each point except the last one
+        for pos in self.positions[:-1]:
+            self.ax.plot(pos[0], pos[1], marker='o', color="red")  # Plot in red
+
+        if self.marker_colour:
+            # Plot the last point in blue if marker_colour is True
             self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="blue")
         else:
-            # Alternatively, plot the last point in red as well
-            self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="red")
+            # Plot the last point in red if marker_colour is False
+            self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="black")
+
+        # Check if there are at least two points to differentiate the start and end
+        if len(self.positions) >= 2:
+            # Plot the starting point in green
+            self.ax.plot(self.positions[0][0], self.positions[0][1], marker='o', color="green")
 
         self.ax.set_xlim(-80, 80)
         self.ax.set_ylim(-80, 80)
         plt.draw()
         plt.pause(0.001)
+
 
 
     
