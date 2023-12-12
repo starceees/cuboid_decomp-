@@ -140,20 +140,31 @@ class KeyboardPlayerPyGame(Player):
         else:
             print("No similar image found in the dataset.")
     
+    
     def update_plot(self):
-        # Update the plot with the new position
+        # Append the new position
         self.positions.append((self.camera_pos[0], self.camera_pos[1]))
-        x, y = zip(*self.positions)
-        self.ax.clear()
+
+        # Clear only if there are no points to retain the color of previous points
+        if not self.positions:
+            self.ax.clear()
+
+        # Plot each point
+        for pos in self.positions[:-1]:  # Plot all but the last point in red
+            self.ax.plot(pos[0], pos[1], marker='o', color="red")
+
         if self.marker_colour == True:
-            self.ax.plot(x, y, marker='ro')
+            # Plot the last point in blue
+            self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="blue")
         else:
-            self.ax.plot(x, y, marker='o')
+            # Alternatively, plot the last point in red as well
+            self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="red")
 
         self.ax.set_xlim(-80, 80)
         self.ax.set_ylim(-80, 80)
         plt.draw()
         plt.pause(0.001)
+
 
     
     def pre_exploration(self):
