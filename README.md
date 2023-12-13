@@ -49,4 +49,4 @@ python player.py
 ```
 
 ## Target finding result
-![Result](robot_perception2023/images/show1.png)
+![Result](images/show1.png)
