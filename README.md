@@ -23,19 +23,6 @@ unless you have photographic memories!
 
 # Implementation
 
-## Depth Estimation 
-Reference: https://github.com/noahzn/Lite-Mono
-
-### Install
-```commandline
-git clone https://github.com/noahzn/Lite-Mono.git
-```
-
-1. [Download](https://surfdrive.surf.nl/files/index.php/s/CUjiK221EFLyXDY) lite-Mono weights
-2. Modify the path in config in [player.py](./player.py) line 13
-3. Modify the system path of Lite-Mono in [test_simple_modified.py](./test_simple_modified.py) line 5
-
-
 ## Map generation
 ### Find the camera rotation angle
 When game start: rotate 360 to find the angles between frames, must be continuous 360; if not, should restart the game
@@ -55,9 +42,6 @@ logic:
 4. Update camera position using polar coordinates
 
 
-### If it is close to wall
-1. If there is a path, the mean depth in the central region of the depth map should larger than 0.9. If it less than 0.9, set the self.move_flag = 0 
-2. Try not to hit the camera back against the wall
 
 ## Run 
 ```commandline
