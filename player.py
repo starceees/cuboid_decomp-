@@ -225,20 +225,7 @@ class KeyboardPlayerPyGame(Player):
             # Plot the last point in black if marker_colour is False
             self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="black")
         
-        # # Plot the target position
-        # if self.target_position is not None and len(self.target_position) > 0:
-        #     # Iterate through each position in target_position
-        #     for i, target_pos in enumerate(self.target_position):
-        #         # Check if the current position is not None
-        #         if target_pos is not None:
-        #             # Plot the position with a yellow marker
-        #             self.ax.plot(target_pos[0], target_pos[1], marker='o', color="yellow")
-
-        #             # Annotate the point with its index number (0, 1, 2, 3)
-        #             # Adjust the text position slightly for better visibility
-        #             self.ax.text(target_pos[0] + 0.1, target_pos[1] + 0.1, str(i), color="blue", fontsize=12)
-        # Assuming self.captured_images is a list of tuples (camera_position, captured_image)
-
+        # Plot the target position
         if self.target_position is not None and len(self.target_position) > 0:
             for i, target_pos in enumerate(self.target_position):
                 if target_pos is not None:
@@ -248,9 +235,6 @@ class KeyboardPlayerPyGame(Player):
 
                     # Find the corresponding camera position
                     for j, (camera_position, captured_image) in enumerate(self.captured_images):
-                        print("camera_position: ", camera_position)
-                        print("target_pos: ", target_pos)
-                        
                         # Use numpy.array_equal for comparison if they are numpy arrays
                         if np.array_equal(camera_position, target_pos):
                             # Plot all previous camera positions in purple
