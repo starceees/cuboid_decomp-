@@ -8,7 +8,11 @@ import math
 import matplotlib.pyplot as plt
 import time
 import threading
+import copy
 import matplotlib.pyplot as plt  
+
+
+
 
 
 # Camera intrinsic matrix
@@ -250,8 +254,8 @@ class KeyboardPlayerPyGame(Player):
 
         self.ax.set_xlim(-200, 200)
         self.ax.set_ylim(-200, 200)
-        # self.ax.set_xlim(-80, 80)
-        # self.ax.set_ylim(-80, 80)
+        # self.ax.set_xlim(-50, 50)
+        # self.ax.set_ylim(-50, 50)
         plt.draw()
         plt.pause(0.001)
 
