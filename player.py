@@ -241,6 +241,8 @@ class KeyboardPlayerPyGame(Player):
 
         self.ax.set_xlim(-80, 80)
         self.ax.set_ylim(-80, 80)
+        # self.ax.set_xlim(-50, 50)
+        # self.ax.set_ylim(-50, 50)
         plt.draw()
         plt.pause(0.001)
 
@@ -303,11 +305,11 @@ class KeyboardPlayerPyGame(Player):
             
             if self.move_step > 0:
                 if self.move_flag == 1:
-                    self.camera_pos[0] += self.move_step * math.cos(self.camera_angle)
-                    self.camera_pos[1] += self.move_step * math.sin(self.camera_angle)
+                    self.camera_pos[0] += self.move_step * math.cos(self.camera_angle) * (0.4)
+                    self.camera_pos[1] += self.move_step * math.sin(self.camera_angle) * (0.4)
                 elif self.move_flag == 2:
-                    self.camera_pos[0] -= self.move_step * math.cos(self.camera_angle)
-                    self.camera_pos[1] -= self.move_step * math.sin(self.camera_angle)
+                    self.camera_pos[0] -= self.move_step * math.cos(self.camera_angle) * (0.4)
+                    self.camera_pos[1] -= self.move_step * math.sin(self.camera_angle) * (0.4)
                 print("camera position: ", self.camera_pos)
 
                 # Update the plot after changing position
