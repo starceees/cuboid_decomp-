@@ -34,6 +34,8 @@ class KeyboardPlayerPyGame(Player):
 
         self.time_interval = 1  # Time interval in seconds to save images
         self.last_capture_time = time.time()
+        self.time_flag = False
+        
 
         self.fpv_counter = 0  # Add a counter for fpv frames
 
@@ -267,6 +269,8 @@ class KeyboardPlayerPyGame(Player):
 
                         self.camera_angle = 0  # Initial orientation of the camera
                         self.rotate_angle = 0  # Total rotation angle
+                        self.time_flag = True
+                        self.start_time = time.time()
 
                 else:
                     self.show_target_images()
@@ -435,9 +439,17 @@ class KeyboardPlayerPyGame(Player):
 
         self.screen.blit(rgb, (0, 0))
 
-        # Display robot pose
+        # Display robot pose and time
+        if self.time_flag:
+            count_time = time.time()
+            seconds = count_time - self.start_time
+            seconds = int(seconds)
+        else:
+            seconds = 0
+        
+
         font = pygame.font.Font(None, 36)
-        text = font.render(f'Pose: {self.camera_pos}', True, (0, 0, 255))
+        text = font.render(f'Pose: {self.camera_pos}    Time: {seconds}', True, (0, 0, 255))
         self.screen.blit(text, (10, 10))
         
         pygame.display.update()
