@@ -7,7 +7,9 @@ from skimage.metrics import structural_similarity as compare_ssim
 import math
 import matplotlib.pyplot as plt
 import time
-import concurrent.futures
+import threading
+import copy
+
 
 
 
@@ -22,12 +24,15 @@ class KeyboardPlayerPyGame(Player):
         self.last_act = Action.IDLE
         self.screen = None
         self.keymap = None
-        self.target_image = None # The target image
-        # self.depth_model = DepthModel(config)  # Create an instance of DepthModel
+        
         self.target_image = None # The target image
         self.captured_images = []
+        self.most_similar_images = [None] * 4
+        self.highest_similarities = [0] * 4
+        self.most_similar_positions = [None] * 4
+        self.lock = threading.Lock() 
 
-        self.time_interval = 5  # Time interval in seconds to save images
+        self.time_interval = 1  # Time interval in seconds to save images
         self.last_capture_time = time.time()
 
         self.fpv_counter = 0  # Add a counter for fpv frames
@@ -56,7 +61,7 @@ class KeyboardPlayerPyGame(Player):
         self.ax.set_xlim(-250, 250)
         self.ax.set_ylim(-250, 250)
 
-        self.target_position = None  # To store the target position
+        self.target_position = [None] * 4  # To store the target position
 
         super(KeyboardPlayerPyGame, self).__init__()
 
@@ -84,80 +89,110 @@ class KeyboardPlayerPyGame(Player):
 
         # Check if the time interval has elapsed
         if time_elapsed >= self.time_interval:
-            self.captured_images.append((camera_position, image))
-            self.last_capture_time = current_time  # Update the last capture time
+            # NOTE: We need to create a copy of the camera_position because it's a numpy array
+            # otherwise, it will be overwritten in the next iteration
+
+            # Create an actual copy of the camera_position
+            camera_position_copy = np.copy(camera_position)
+
+            # # Debugging: print the camera position before appending
+            # print("Storing camera position:", camera_position_copy)
+
+            self.captured_images.append((camera_position_copy, image))
+            # print("self.captured_images: ", self.captured_images)
+            self.last_capture_time = current_time   # Update the last capture time
 
 
-    def compare_image(self, target_details, captured_details):
-        target_image, target_keypoints, target_descriptors = target_details
-        camera_position, captured_image = captured_details
+    def compare_with_target_features(self, target_index, captured_images):
+        # Load the target image
+        target_image_path = f'target_temp_{target_index}.png'
+        target_image = cv2.imread(target_image_path, cv2.IMREAD_GRAYSCALE)
         orb = cv2.ORB_create()
 
-        # Extract features from the captured image
-        keypoints, descriptors = orb.detectAndCompute(captured_image, None)
+        # Extract features from the target image
+        target_keypoints, target_descriptors = orb.detectAndCompute(target_image, None)
 
-        # Create a BFMatcher (Brute Force Matcher) with Hamming distance
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        for i, (camera_position, captured_image) in enumerate(captured_images):
+            # # Debugging: Print the index and camera position
+            # print(f"Before Processing index {i}, camera_position: {camera_position}")
 
-        # Match the descriptors
-        matches = bf.match(target_descriptors, descriptors)
-        matches = sorted(matches, key=lambda x: x.distance)
+            # Extract features from the captured image
+            keypoints, descriptors = orb.detectAndCompute(captured_image, None)
 
-        # Calculate similarity based on the number of matches
-        similarity = 1 - (matches[0].distance / len(target_descriptors)) if matches else 0
+            # Create a BFMatcher (Brute Force Matcher) with Hamming distance
+            bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
-        # Convert camera_position to a tuple if it's an array
-        camera_position_tuple = tuple(camera_position.flatten()) if isinstance(camera_position, np.ndarray) else camera_position
+            # Match the descriptors
+            matches = bf.match(target_descriptors, descriptors)
+            matches = sorted(matches, key=lambda x: x.distance)
 
-        return similarity, camera_position_tuple, captured_image
+            # # Debugging: Print the camera position again after processing
+            # print(f"After Processed index {i}, camera_position: `{camera_position}`")
 
-    def compare_with_target_features(self):
 
-        # Store the most similar images for each target
-        most_similar_images = []
-        # Load the target images
-        target_images = [cv2.imread(f'target_temp_{i}.png', cv2.IMREAD_GRAYSCALE) for i in range(4)]
-        orb = cv2.ORB_create()
+            # Calculate similarity
+            if len(matches) > 0:
+                with self.lock:
+                    similarity = 1 - (matches[0].distance / len(target_descriptors))
+                    if similarity > self.highest_similarities[target_index]:
+                        self.highest_similarities[target_index] = similarity
+                        self.most_similar_images[target_index] = captured_image
+                        self.most_similar_positions[target_index] = camera_position
 
-        # Extract features from each target image
-        target_details = [(img, *orb.detectAndCompute(img, None)) for img in target_images]
+    def run_comparisons(self):
+        threads = []
 
-        similarities = []
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            # Iterate over each target image and submit comparison tasks
-            for target_detail in target_details:
-                futures = [executor.submit(self.compare_image, target_detail, details) for details in self.captured_images]
-                similarities.append({future.result()[1]: future.result()[0] for future in concurrent.futures.as_completed(futures)})
+        # Assuming self.captured_images is a list of tuples [(camera_position, captured_image), ...]
+        # We need to distribute this list equally among the threads
+        num_cameras = len(self.captured_images)
+        cameras_per_thread = num_cameras // 4
 
-        # Find positions where all four images have high similarity
-        high_similarity_positions = []
-        for pos in similarities[0]:
-            if all(pos in s and s[pos] > 0.8 for s in similarities):  # Adjust the threshold as needed
-                high_similarity_positions.append(pos)
+        for i in range(4):
+            # Calculate the start and end indices for each subset of captured_images
+            start_idx = i * cameras_per_thread
+            end_idx = start_idx + cameras_per_thread
 
-        # print("self.captured_images: ", self.captured_images)
-        # Output results and display images
-        if high_similarity_positions:
-            print("High similarity positions:", high_similarity_positions)
-            self.target_position = high_similarity_positions
-            print("self.target_position: ", self.target_position)   
+            # If it's the last thread, include any remaining cameras
+            if i == 3:
+                end_idx = num_cameras
 
-            # Convert high_similarity_positions to tuple format
-            high_similarity_positions_tuples = [tuple(pos) for pos in high_similarity_positions]
+            # Extract the subset for this thread
+            captured_images_subset = self.captured_images[start_idx:end_idx]
 
-            for position, image in self.captured_images:
-                # Convert position to tuple if necessary
-                position_tuple = tuple(position) if isinstance(position, np.ndarray) else position
+            # Start the thread with the subset
+            thread = threading.Thread(target=self.compare_with_target_features, args=(i, captured_images_subset,))
+            threads.append(thread)
+            thread.start()
 
-                # Debugging print
-                print(f"Checking position: {position_tuple}")
+        for thread in threads:
+            thread.join()
 
-                if position_tuple in high_similarity_positions_tuples:
-                    # Display the image at the matching position
-                    print(f"Displaying image at position: {position_tuple}")
-                    cv2.imshow(f"Image at Position {position_tuple}", image)
-                    cv2.waitKey(0)
-                    cv2.destroyAllWindows()
+
+
+        for i in range(4):
+            if self.most_similar_images[i] is not None:
+                # Prepare the text to be written
+                text = f"Position: {self.most_similar_positions[i]}"
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.5
+                font_color = (255, 0, 0)  # Blue color in BGR
+                line_type = 2
+
+                # Copy the image to avoid modifying the original
+                image_with_text = self.most_similar_images[i].copy()
+
+                # Put the text on the image
+                cv2.putText(image_with_text, text, (10, 30), font, font_scale, font_color, line_type)
+
+                # Show the image
+                window_name = f"Matched Image for Target {i}"
+                cv2.imshow(window_name, image_with_text)
+
+                self.target_position[i] = self.most_similar_positions[i]
+                print(f"Target {i}: Highest similarity {self.highest_similarities[i]} at position {self.most_similar_positions[i]}")
+            else:
+                print(f"Target {i}: No similar image found.")
+
             
     def update_plot(self):
         # Append the new position
@@ -186,24 +221,26 @@ class KeyboardPlayerPyGame(Player):
             self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="blue")
         else:
             # Plot the last point in black if marker_colour is False
-            # TODO: self.positions[-1][0], self.positions[-1][1] to target position
-            # or remain it and add a new traget position
             self.ax.plot(self.positions[-1][0], self.positions[-1][1], marker='o', color="black")
         
-        # Plot the target position in yellow if it's not None and not empty
-        if self.target_position:
-            # Extract and plot the first position from target_position in yellow
-            target_pos = self.target_position[0]
-            print("target_pos: ", target_pos)
-            self.ax.plot(target_pos[0], target_pos[1], marker='o', color="yellow")
+        # Plot the target position
+        if self.target_position is not None and len(self.target_position) > 0:
+            # Iterate through each position in target_position
+            for i, target_pos in enumerate(self.target_position):
+                # Check if the current position is not None
+                if target_pos is not None:
+                    # Plot the position with a yellow marker
+                    self.ax.plot(target_pos[0], target_pos[1], marker='o', color="yellow")
+
+                    # Annotate the point with its index number (0, 1, 2, 3)
+                    # Adjust the text position slightly for better visibility
+                    self.ax.text(target_pos[0] + 0.1, target_pos[1] + 0.1, str(i), color="blue", fontsize=12)
+
 
         self.ax.set_xlim(-80, 80)
         self.ax.set_ylim(-80, 80)
         plt.draw()
         plt.pause(0.001)
-
-
-
 
     
     def pre_exploration(self):
@@ -233,7 +270,8 @@ class KeyboardPlayerPyGame(Player):
 
                 else:
                     self.show_target_images()
-                    self.compare_with_target_features()
+                    self.run_comparisons()
+
 
             if event.type == pygame.KEYUP:
                 if event.key in self.keymap:
@@ -327,10 +365,8 @@ class KeyboardPlayerPyGame(Player):
         concat_img = cv2.line(concat_img, (int(h/2), 0), (int(h/2), w), color, 2)
         concat_img = cv2.line(concat_img, (0, int(w/2)), (h, int(w/2)), color, 2)
 
-        # TODO: should we store the concat one or all the 4 images?
         self.target_image = concat_img
 
-        # selected_target = targets[0]
         selected_target = targets
 
         w_offset = 25
@@ -348,8 +384,7 @@ class KeyboardPlayerPyGame(Player):
         cv2.imshow(f'KeyboardPlayer:target_images', concat_img)
         cv2.waitKey(1)
 
-        # self.target_image_path = 'target_temp.png'
-        # cv2.imwrite(self.target_image_path, selected_target)
+
         for i, image in enumerate(selected_target):
             self.target_image_path = f'target_temp_{i}.png'  # Create a unique file name for each image
             cv2.imwrite(self.target_image_path, image)
@@ -358,16 +393,6 @@ class KeyboardPlayerPyGame(Player):
         super(KeyboardPlayerPyGame, self).set_target_images(images)
         self.show_target_images()
 
-    def is_close_to_wall(self, depth_map, threshold=0.9):
-        # Analyze only the central region of the depth map
-        h, w = depth_map.shape[:2]
-        central_region = depth_map[int(h*0.4):int(h*0.6), int(w*0.4):int(w*0.6)]
-
-        # Calculate the mean depth in this central region
-        mean_depth = np.mean(central_region)
-        # print(f"Mean depth in the central region: {mean_depth}")
-
-        return mean_depth < threshold
 
 
     def see(self, fpv):
