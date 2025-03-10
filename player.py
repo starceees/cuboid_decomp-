@@ -13,29 +13,27 @@ import random
 # -------------------------------------------------------------------------
 # Configuration Constants
 # -------------------------------------------------------------------------
-SCALE = 8
-OFFSET = int(3 / (SCALE / 8))
-MIN_BASELINE = 1e-3  # not used here
+OCC_RESOLUTION = 0.1     # Fine occupancy grid resolution (meters per cell)
+CORRIDOR_OFFSET = 1.5    # Lateral offset from robot’s center (in meters) to mark as wall
+MIN_BASELINE = 1e-3      # Not used here
 
-# Original occupancy map parameters (meters per cell)
-OCC_RESOLUTION = 0.1
-
-# Parameters for simple occupancy update (in meters)
-# corridor_offset: how far from the robot center the walls are located.
-CORRIDOR_OFFSET = 1.0   # cells at ±1 m lateral will be marked as wall.
-
-# Occupancy codes (internal representation):
-#   -1 = Unknown (untouched) → displayed white.
-#    0 = Wall (blocked)       → displayed red.
-#    1 = Path (traversable corridor) → displayed yellow.
+# Occupancy codes (internal representation)
+#   UNKNOWN_VAL (-1) → Unknown → display as white
+#   WALL_VAL (0)     → Wall    → display as red
+#   PATH_VAL (1)     → Path    → display as yellow
 PATH_VAL = 1
 WALL_VAL = 0
 UNKNOWN_VAL = -1
 
-# Colors for blocky map in BGR (if needed for manual conversion):
+# Coarser grid resolution for merging (meters per cell)
+NEW_RESOLUTION = 0.3
+
+# -------------------------------------------------------------------------
+# Color Map for Display (BGR format)
+# -------------------------------------------------------------------------
 COLOR_MAP = {
     UNKNOWN_VAL: np.array([255, 255, 255], dtype=np.uint8),  # white
-    WALL_VAL:    np.array([0, 0, 255], dtype=np.uint8),        # red
+    WALL_VAL:    np.array([0, 0, 255],   dtype=np.uint8),      # red
     PATH_VAL:    np.array([0, 255, 255], dtype=np.uint8)       # yellow
 }
 
@@ -65,77 +63,18 @@ def estimate_rotation_phase_correlation(img1, img2):
     dtheta_deg = (shift[1] / lp1.shape[0]) * 360.0
     return math.radians(dtheta_deg)
 
-def dynamic_world_to_map(x_world, y_world, map_origin, resolution):
-    i = int((y_world - map_origin[1]) / resolution)
-    j = int((x_world - map_origin[0]) / resolution)
+def dynamic_world_to_map(x_world, y_world, origin, resolution):
+    i = int((y_world - origin[1]) / resolution)
+    j = int((x_world - origin[0]) / resolution)
     return i, j
-
-def astar_white(occ_img, start, goal):
-    """
-    A* search on a 2D occupancy image where white (255) indicates free.
-    start and goal are grid indices (i,j).
-    Returns a list of grid indices forming the path or None.
-    """
-    def heuristic(a, b):
-        return math.hypot(b[0]-a[0], b[1]-a[1])
-    neighbors = [(-1,0), (1,0), (0,-1), (0,1),
-                 (-1,-1), (-1,1), (1,-1), (1,1)]
-    import heapq
-    close_set = set()
-    came_from = {}
-    gscore = {start: 0}
-    fscore = {start: heuristic(start, goal)}
-    oheap = []
-    heapq.heappush(oheap, (fscore[start], start))
-    while oheap:
-        current = heapq.heappop(oheap)[1]
-        if current == goal:
-            path = []
-            while current in came_from:
-                path.append(current)
-                current = came_from[current]
-            path.append(start)
-            path.reverse()
-            return path
-        close_set.add(current)
-        for di, dj in neighbors:
-            ni, nj = current[0] + di, current[1] + dj
-            if not (0 <= ni < occ_img.shape[0] and 0 <= nj < occ_img.shape[1]):
-                continue
-            if occ_img[ni, nj] != 255:
-                continue
-            tentative_g = gscore[current] + heuristic(current, (ni, nj))
-            if (ni, nj) in close_set and tentative_g >= gscore.get((ni, nj), float('inf')):
-                continue
-            if tentative_g < gscore.get((ni, nj), float('inf')) or (ni, nj) not in [i[1] for i in oheap]:
-                came_from[(ni, nj)] = current
-                gscore[(ni, nj)] = tentative_g
-                fscore[(ni, nj)] = tentative_g + heuristic((ni, nj), goal)
-                heapq.heappush(oheap, (fscore[(ni, nj)], (ni, nj)))
-    return None
-
-def convert_occ_to_blocky_image(occ, cell_size=10):
-    """
-    Convert an occupancy grid (2D numpy array with values -1, 0, 1)
-    into a blocky BGR image. Each grid cell is repeated as a block.
-    """
-    H, W = occ.shape
-    img = np.zeros((H, W, 3), dtype=np.uint8)
-    for key, color in COLOR_MAP.items():
-        img[occ == key] = color
-    blocky_img = np.kron(img, np.ones((cell_size, cell_size, 1), dtype=np.uint8))
-    return blocky_img
 
 def merge_occupancy_grid(occ, new_resolution):
     """
-    Given the original occupancy grid 'occ' at resolution OCC_RESOLUTION,
-    create a coarser grid at resolution new_resolution by merging adjacent cells.
-    We'll use a simple rule:
-      - Divide occ into blocks of size block_size x block_size, where
-        block_size = new_resolution / OCC_RESOLUTION.
-      - For each block, if the number of PATH cells is greater than the number of WALL cells and at least one PATH exists,
-        mark the new cell as PATH; else if any WALL exists, mark as WALL; else UNKNOWN.
-    Returns the new occupancy grid and its resolution.
+    Merge the fine occupancy grid (occ, at OCC_RESOLUTION) into a coarser grid at resolution new_resolution.
+    For each block (block_size = new_resolution / OCC_RESOLUTION):
+      - If number of PATH cells > number of WALL cells and at least one PATH exists → PATH.
+      - Else if any WALL exists → WALL.
+      - Otherwise → UNKNOWN.
     """
     block_size = int(new_resolution / OCC_RESOLUTION)
     H, W = occ.shape
@@ -155,6 +94,62 @@ def merge_occupancy_grid(occ, new_resolution):
                 new_occ[i, j] = UNKNOWN_VAL
     return new_occ
 
+def convert_occ_to_blocky_image(occ, cell_size=10):
+    """
+    Convert occupancy grid to a blocky BGR image.
+    Each grid cell is repeated as a block of size cell_size x cell_size.
+    """
+    H, W = occ.shape
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    for key, color in COLOR_MAP.items():
+        img[occ == key] = color
+    blocky_img = np.kron(img, np.ones((cell_size, cell_size, 1), dtype=np.uint8))
+    return blocky_img
+
+def astar_white(occ_img, start, goal):
+    """
+    A* search on a 2D occupancy image where white (255) indicates free.
+    start and goal are grid indices (i, j).
+    Returns a list of grid indices forming the path or None.
+    """
+    def heuristic(a, b):
+        return math.hypot(b[0]-a[0], b[1]-a[1])
+    neighbors = [(-1,0),(1,0),(0,-1),(0,1),
+                 (-1,-1),(-1,1),(1,-1),(1,1)]
+    import heapq
+    close_set = set()
+    came_from = {}
+    gscore = {start: 0}
+    fscore = {start: heuristic(start, goal)}
+    oheap = []
+    heapq.heappush(oheap, (fscore[start], start))
+    while oheap:
+        current = heapq.heappop(oheap)[1]
+        if current == goal:
+            path = []
+            while current in came_from:
+                path.append(current)
+                current = came_from[current]
+            path.append(start)
+            path.reverse()
+            return path
+        close_set.add(current)
+        for di, dj in neighbors:
+            ni, nj = current[0]+di, current[1]+dj
+            if not (0 <= ni < occ_img.shape[0] and 0 <= nj < occ_img.shape[1]):
+                continue
+            if occ_img[ni, nj] != 255:
+                continue
+            tentative_g = gscore[current] + heuristic(current, (ni, nj))
+            if (ni, nj) in close_set and tentative_g >= gscore.get((ni, nj), float('inf')):
+                continue
+            if tentative_g < gscore.get((ni, nj), float('inf')) or (ni, nj) not in [x[1] for x in oheap]:
+                came_from[(ni, nj)] = current
+                gscore[(ni, nj)] = tentative_g
+                fscore[(ni, nj)] = tentative_g + heuristic((ni, nj), goal)
+                heapq.heappush(oheap, (fscore[(ni, nj)], (ni, nj)))
+    return None
+
 # -------------------------------------------------------------------------
 # Main Player Class: EKF + Visual Measurement + Data Logging
 # -------------------------------------------------------------------------
@@ -168,8 +163,8 @@ class KeyboardPlayerPyGame(Player):
         self.prev_fpv = None
         self.prev_x = None
         self.K = None
-        self.mapping_data = []  # (timestamp, state, FPV image)
-        self.path = []          # (timestamp, X, Y, theta)
+        self.mapping_data = []  # List of (timestamp, state, FPV image)
+        self.path = []          # List of (timestamp, X, Y, theta)
         self.fpv = None
         self.last_act = Action.IDLE
         self.screen = None
@@ -207,6 +202,7 @@ class KeyboardPlayerPyGame(Player):
                                [0, 92., 120.],
                                [0, 0, 1]])
         print("Game started. Mapping will be performed in the navigation phase.")
+        print("Only forward/backward moves are recorded for occupancy (turn-only poses are skipped).")
 
     def pre_navigation(self):
         pass
@@ -223,8 +219,8 @@ class KeyboardPlayerPyGame(Player):
         thp = normalize_angle(th + dth)
         self.x = np.array([[Xp],[Yp],[thp]])
         F = np.array([
-            [1, 0, -dx*math.sin(th)],
-            [0, 1,  dx*math.cos(th)],
+            [1, 0, -dx * math.sin(th)],
+            [0, 1,  dx * math.cos(th)],
             [0, 0, 1]
         ])
         Q = np.diag([0.01, 0.01, math.radians(1)**2])
@@ -257,7 +253,8 @@ class KeyboardPlayerPyGame(Player):
                     self.last_act ^= self.keymap[event.key]
         speed = 0.5
         rot_speed = math.radians(2.5)
-        u1 = 0.0; u2 = 0.0
+        u1 = 0.0
+        u2 = 0.0
         if self.last_act & Action.FORWARD:
             u1 = speed / self.dt
         if self.last_act & Action.BACKWARD:
@@ -288,27 +285,30 @@ class KeyboardPlayerPyGame(Player):
         pygame.display.update()
 
         t_stamp = time.time() - self.start_time
-        self.path.append((t_stamp, self.x[0,0], self.x[1,0], self.x[2,0]))
         self.mapping_data.append((t_stamp, self.x.copy(), self.fpv.copy()))
         print(f"Mapping data count: {len(self.mapping_data)}")
+
         if self.prev_fpv is None:
             self.prev_fpv = fpv.copy()
             self.prev_x = self.x.copy()
             print("First image captured; state initialized.")
         else:
-            dtheta_visual = estimate_rotation_phase_correlation(self.prev_fpv, fpv)
-            dtheta_visual *= 0.25
-            if dtheta_visual is None or abs(dtheta_visual) < math.radians(1):
+            dtheta = estimate_rotation_phase_correlation(self.prev_fpv, fpv) * 0.25
+            if dtheta is None or abs(dtheta) < math.radians(1):
                 z = self.x[2,0]
             else:
-                z = normalize_angle(self.prev_x[2,0] + dtheta_visual)
-                print(f"Visual measurement (scaled): dtheta = {math.degrees(dtheta_visual):.1f}°")
+                z = normalize_angle(self.prev_x[2,0] + dtheta)
+                print(f"Visual measurement (scaled): dtheta = {math.degrees(dtheta):.1f}°")
             if images_are_similar(self.prev_fpv, fpv, threshold=0.99):
                 z = self.x[2,0]
             self.ekf_update(z)
             self.prev_x = self.x.copy()
             self.prev_fpv = fpv.copy()
             print(f"Current state: {self.x.flatten()}")
+
+        # Only record path if moving forward/backward (skip pure turns)
+        if (self.last_act & Action.FORWARD) or (self.last_act & Action.BACKWARD):
+            self.path.append((t_stamp, self.x[0,0], self.x[1,0], self.x[2,0]))
 
     def show_target_images(self):
         tg = self.get_target_images()
@@ -324,12 +324,12 @@ class KeyboardPlayerPyGame(Player):
         super().set_target_images(images)
         self.show_target_images()
 
-    def compute_transformation(self, prev_state, current_state):
-        dtheta = angle_diff(current_state[2], prev_state[2])
+    def compute_transformation(self, prev_state, curr_state):
+        dtheta = angle_diff(curr_state[2], prev_state[2])
         R = np.array([[math.cos(dtheta), -math.sin(dtheta)],
                       [math.sin(dtheta),  math.cos(dtheta)]])
-        t = np.array([[current_state[0] - prev_state[0]],
-                      [current_state[1] - prev_state[1]]])
+        t = np.array([[curr_state[0] - prev_state[0]],
+                      [curr_state[1] - prev_state[1]]])
         T = np.eye(3)
         T[0:2, 0:2] = R
         T[0:2, 2:3] = t
@@ -338,7 +338,7 @@ class KeyboardPlayerPyGame(Player):
 # -------------------------------------------------------------------------
 # Main Runner and Post-Mapping Processing
 # -------------------------------------------------------------------------
-if __name__ == "__main__":
+if __name__=="__main__":
     from vis_nav_game import play
     player = KeyboardPlayerPyGame()
     play(the_player=player)
@@ -347,43 +347,41 @@ if __name__ == "__main__":
 
     # --- Build a Simple Occupancy Grid from the Recorded Path ---
     if len(player.path) == 0:
-        print("No path data recorded.")
+        print("No path data recorded (only turn actions detected).")
     else:
-        # Convert path to numpy array: shape (N,4): [time, X, Y, theta]
-        path = np.array(player.path)
-        # Compute bounding box from path with margin
+        path = np.array(player.path)  # shape (N,4): [time, X, Y, theta]
+        # Compute bounding box with margin
         min_x, max_x = path[:,1].min(), path[:,1].max()
         min_y, max_y = path[:,2].min(), path[:,2].max()
         margin = 5.0
-        origin_dynamic = (min_x - margin, min_y - margin)
-        map_width = (max_x - min_x) + 2 * margin
-        map_height = (max_y - min_y) + 2 * margin
-        grid_width = int(map_width / OCC_RESOLUTION)
-        grid_height = int(map_height / OCC_RESOLUTION)
-        
-        # Initialize occupancy grid with UNKNOWN_VAL (-1)
-        occ_map = np.full((grid_height, grid_width), UNKNOWN_VAL, dtype=int)
-        
-        # Mark path and walls using the simple update logic.
-        for (t_stamp, X, Y, theta) in path:
-            # Mark robot's cell as path (1)
-            i, j = dynamic_world_to_map(X, Y, origin_dynamic, OCC_RESOLUTION)
-            if 0 <= i < grid_height and 0 <= j < grid_width:
-                occ_map[i, j] = PATH_VAL
-            # Mark left offset as wall (0)
-            left_x = X - CORRIDOR_OFFSET * math.sin(theta)
-            left_y = Y + CORRIDOR_OFFSET * math.cos(theta)
-            i_left, j_left = dynamic_world_to_map(left_x, left_y, origin_dynamic, OCC_RESOLUTION)
-            if 0 <= i_left < grid_height and 0 <= j_left < grid_width:
-                occ_map[i_left, j_left] = WALL_VAL
-            # Mark right offset as wall (0)
-            right_x = X + CORRIDOR_OFFSET * math.sin(theta)
-            right_y = Y - CORRIDOR_OFFSET * math.cos(theta)
-            i_right, j_right = dynamic_world_to_map(right_x, right_y, origin_dynamic, OCC_RESOLUTION)
-            if 0 <= i_right < grid_height and 0 <= j_right < grid_width:
-                occ_map[i_right, j_right] = WALL_VAL
+        origin = (min_x - margin, min_y - margin)
+        map_w = (max_x - min_x) + 2 * margin
+        map_h = (max_y - min_y) + 2 * margin
+        grid_w = int(map_w / OCC_RESOLUTION)
+        grid_h = int(map_h / OCC_RESOLUTION)
 
-        # --- (Debug) Show original occupancy grid using imshow ---
+        # Initialize fine occupancy grid with UNKNOWN_VAL (-1)
+        occ_map = np.full((grid_h, grid_w), UNKNOWN_VAL, dtype=int)
+
+        # Fill the fine occupancy grid: mark robot positions as PATH and lateral offsets as WALL.
+        for (t_stamp, X, Y, theta) in path:
+            i, j = dynamic_world_to_map(X, Y, origin, OCC_RESOLUTION)
+            if 0 <= i < grid_h and 0 <= j < grid_w:
+                occ_map[i, j] = PATH_VAL
+            # Left offset as wall
+            lx = X - CORRIDOR_OFFSET * math.sin(theta)
+            ly = Y + CORRIDOR_OFFSET * math.cos(theta)
+            iL, jL = dynamic_world_to_map(lx, ly, origin, OCC_RESOLUTION)
+            if 0 <= iL < grid_h and 0 <= jL < grid_w:
+                occ_map[iL, jL] = WALL_VAL
+            # Right offset as wall
+            rx = X + CORRIDOR_OFFSET * math.sin(theta)
+            ry = Y - CORRIDOR_OFFSET * math.cos(theta)
+            iR, jR = dynamic_world_to_map(rx, ry, origin, OCC_RESOLUTION)
+            if 0 <= iR < grid_h and 0 <= jR < grid_w:
+                occ_map[iR, jR] = WALL_VAL
+
+        # Display fine occupancy grid as an RGB image.
         def occupancy_to_rgb(occ):
             rgb = np.zeros((occ.shape[0], occ.shape[1], 3), dtype=np.uint8)
             rgb[occ == UNKNOWN_VAL] = [255, 255, 255]  # white
@@ -391,28 +389,39 @@ if __name__ == "__main__":
             rgb[occ == PATH_VAL] = [255, 255, 0]         # yellow
             return rgb
 
-        occ_rgb = occupancy_to_rgb(occ_map)
+        fine_rgb = occupancy_to_rgb(occ_map)
         plt.figure(figsize=(10,10))
-        plt.imshow(occ_rgb, origin='lower')
-        plt.title("2D Occupancy Grid (Original Color Mapping)")
+        plt.imshow(fine_rgb, origin='lower')
+        plt.title("Fine Occupancy Grid (Skipping Turn-Only Poses)")
         plt.show()
 
-        # --- Show blocky map using our custom conversion ---
-        blocky_img = convert_occ_to_blocky_image(occ_map, cell_size=10)
+        # Convert fine grid to blocky image (for visual inspection)
+        def convert_occ_to_blocky_image(occ, cell_size=10):
+            H, W = occ.shape
+            img = np.zeros((H, W, 3), dtype=np.uint8)
+            for key, color in COLOR_MAP.items():
+                img[occ == key] = color
+            blocky = np.kron(img, np.ones((cell_size, cell_size, 1), dtype=np.uint8))
+            return blocky
+
+        fine_blocky = convert_occ_to_blocky_image(occ_map, cell_size=10)
         plt.figure(figsize=(10,10))
-        plt.imshow(cv2.cvtColor(blocky_img, cv2.COLOR_BGR2RGB))
-        plt.title("Blocky Occupancy Grid")
+        plt.imshow(cv2.cvtColor(fine_blocky, cv2.COLOR_BGR2RGB))
+        plt.title("Blocky Occupancy Grid (Fine)")
         plt.axis('off')
         plt.show()
 
-        # --- Merge the occupancy grid to a coarser grid for planning ---
-        # Choose a new resolution (e.g., 0.5 m per cell)
-        NEW_RESOLUTION = 0.5
+        # --- Merge Fine Grid into Coarser Grid for Planning ---
         merged_occ = merge_occupancy_grid(occ_map, NEW_RESOLUTION)
-        # For planning, we want to plan on the traversable cells (PATH_VAL).
+        # For planning, we consider PATH cells as free: set PATH_VAL to 255, others 0.
         planning_img = np.where(merged_occ == PATH_VAL, 255, 0).astype(np.uint8)
 
-        # Display the merged grid as a blocky image
+        # --- Post-Process Merged Grid: Dilate Free Cells to widen the corridor ---
+        # Adjust the kernel size as needed; here we use a 3x3 kernel.
+        kernel = np.ones((3, 3), np.uint8)
+        planning_img_dilated = cv2.dilate(planning_img, kernel, iterations=1)
+
+        # Display merged (coarse) grid as blocky image.
         merged_blocky = convert_occ_to_blocky_image(merged_occ, cell_size=20)
         plt.figure(figsize=(10,10))
         plt.imshow(cv2.cvtColor(merged_blocky, cv2.COLOR_BGR2RGB))
@@ -420,26 +429,34 @@ if __name__ == "__main__":
         plt.axis('off')
         plt.show()
 
-        # --- A* Path Planning on the Merged Grid ---
-        free_cells = np.argwhere(planning_img == 255)
+        # Display the dilated planning image.
+        plt.figure(figsize=(10,10))
+        plt.imshow(planning_img_dilated, origin='lower', cmap='gray')
+        plt.title("Dilated Planning Image (Free Cells Widened)")
+        plt.axis('off')
+        plt.show()
+
+        # --- A* Path Planning on the Dilated Planning Image ---
+        free_cells = np.argwhere(planning_img_dilated == 255)
         if len(free_cells) < 2:
-            print("Not enough traversable path cells for A* planning.")
+            print("Not enough free cells in merged grid for A* planning.")
         else:
             start_idx = tuple(random.choice(free_cells))
             goal_idx = tuple(random.choice(free_cells))
             print(f"Random start index: {start_idx}, Random goal index: {goal_idx}")
-            plan = astar_white(planning_img, start_idx, goal_idx)
+            plan = astar_white(planning_img_dilated, start_idx, goal_idx)
             if plan is None:
-                print("A* could not find a path on the traversable region.")
+                print("A* could not find a path on the dilated merged grid.")
             else:
                 plan_world = []
                 for (i, j) in plan:
-                    xw = j * NEW_RESOLUTION + origin_dynamic[0] + NEW_RESOLUTION / 2.0
-                    yw = i * NEW_RESOLUTION + origin_dynamic[1] + NEW_RESOLUTION / 2.0
+                    xw = j * NEW_RESOLUTION + origin[0] + NEW_RESOLUTION / 2.0
+                    yw = i * NEW_RESOLUTION + origin[1] + NEW_RESOLUTION / 2.0
                     plan_world.append((xw, yw))
                 plan_world = np.array(plan_world)
+                print(f"A* found a path with length {len(plan_world)}.")
                 plt.figure(figsize=(10,10))
-                plt.imshow(planning_img, origin='lower', cmap='gray')
+                plt.imshow(planning_img_dilated, origin='lower', cmap='gray')
                 plt.plot(plan_world[:,0], plan_world[:,1], 'b.-', label="A* Path")
                 plt.title("Merged Occupancy Grid with A* Path")
                 plt.legend()
@@ -452,7 +469,7 @@ if __name__ == "__main__":
         plt.plot(path[:,1], path[:,2], '-o', markersize=3, label='Path')
         plt.xlabel('X (m)')
         plt.ylabel('Y (m)')
-        plt.title('2D Path Followed')
+        plt.title('2D Path Followed (Skipping Turn-Only Poses)')
         plt.axis('equal')
         plt.grid(True)
         plt.legend()
