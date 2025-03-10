@@ -1,0 +1,11 @@
+05-Mar-25 12:13:33 - INFO: player.py is using vis_nav_game 1.1.2
+05-Mar-25 12:13:33 - INFO: vis_nav_game.core version=1.1.2
+05-Mar-25 12:13:33 - INFO: init from C:\Users\raghu\OneDrive\Documents\cuboid_decomp\Robot-_Perception_Course_Project\startup.json: {'ESSENTIAL_FILE_ID': '1CvIOxnKO8Z8NDBh-kKOpUuWEgPinLLSV', 'MAZE_FILE_ID': '1WqRJRqphnDg1tNZaF4RNFIoQTFerLm2z', 'MAZE_FILE_MD5_KEY': '2ac407ed3d32730acfe182fb9e1e4144'}
+05-Mar-25 12:13:33 - INFO: Pass checking essential files
+05-Mar-25 12:13:33 - INFO: Verified C:\Users\raghu\OneDrive\Documents\cuboid_decomp\Robot-_Perception_Course_Project\data\maze.json
+05-Mar-25 12:13:33 - INFO: The file 'C:\Users\raghu\OneDrive\Documents\cuboid_decomp\Robot-_Perception_Course_Project\data\maze.json' exists.
+05-Mar-25 12:13:33 - INFO: Start loading the map
+05-Mar-25 12:13:48 - INFO: Finished loading the map: takes 14.965153455734253 s
+05-Mar-25 12:13:50 - INFO: Target Images processing completed.
+05-Mar-25 12:33:50 - INFO: Saving the game, please wait...
+05-Mar-25 12:33:50 - INFO: Game saved successfully at C:\Users\raghu\OneDrive\Documents\cuboid_decomp\Robot-_Perception_Course_Project\data\save\game-20250305-123350.npy.
