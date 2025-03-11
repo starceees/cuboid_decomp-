@@ -1,63 +1,40 @@
-\documentclass[11pt]{article}
-\usepackage[margin=1in]{geometry}
-\usepackage{listings}
-\usepackage{xcolor}
-\usepackage{hyperref}
+# Occupancy Grid Mapping and A* Path Planning
 
-\definecolor{codegray}{rgb}{0.95,0.95,0.95}
-\lstset{
-  basicstyle=\small\ttfamily,
-  backgroundcolor=\color{codegray},
-  frame=single,
-  columns=flexible,
-  keepspaces=true
-}
+This project demonstrates a simple approach to build a 2D occupancy grid from robot pose data recorded in a simulated environment and then run A* path planning on the generated map.
 
-\begin{document}
+## Overview
 
-\title{Occupancy Grid Mapping \& A* Planning (Brief)}
-\author{Your Name}
-\date{\today}
-\maketitle
+The project consists of two main phases:
 
-\section{Overview}
-This document demonstrates:
-\begin{itemize}
-  \item Building a \textbf{fine occupancy grid} from a robot path (skipping pure turns).
-  \item \textbf{Merging} or down-sampling the grid to a coarser resolution.
-  \item Optionally \textbf{dilating} path cells to widen corridors.
-  \item \textbf{Saving} the final grid as a \verb|.npy| file.
-  \item \textbf{Loading} that file in a separate script and running \textbf{A*}.
-\end{itemize}
+1. **Mapping Phase:**  
+   - The robot records its poses (skipping pure turning) using a `vis_nav_game` simulation.
+   - A fine occupancy grid is built from the recorded path data.  
+     *Cells are represented internally as:*  
+     - **-1:** Unknown (displayed as white)  
+     - **0:** Wall (blocked, displayed as red)  
+     - **1:** Path (traversable, displayed as yellow)
+   - The fine grid is merged to a coarser resolution.
+   - Morphological dilation is applied to widen the traversable corridors.
+   - The final occupancy grid is saved as a `.npy` file.
 
-\section{Main Code (Build \& Save)}
-Below is a minimal snippet of Python that uses \verb|vis_nav_game| to record poses and build the grid:
-\begin{lstlisting}[language=Python]
-# main_build_map.py
+2. **Planning Phase:**  
+   - A separate script loads the saved occupancy grid.
+   - A* path planning is performed on the grid (treating both path and unknown as free, and walls as obstacles).
+   - The planned path is displayed over the occupancy grid.
 
-OCC_RESOLUTION = 0.1
-CORRIDOR_OFFSET = 1.5
-NEW_RESOLUTION = 0.3
+## Requirements
 
-# Build the fine grid from path, mark PATH=1, WALL=0, UNKNOWN=-1
-# Merge to coarser resolution, optionally dilate the path, then save:
-merged_dil = dilate_path_cells( merged_occ, kernel_size=7, iterations=2 )
-np.save("my_occupancy_map.npy", merged_dil)
-\end{lstlisting}
+- Python 3.7+
+- [numpy](https://numpy.org/)
+- [opencv-python](https://pypi.org/project/opencv-python/)
+- [matplotlib](https://matplotlib.org/)
+- [scikit-image](https://scikit-image.org/)
+- [pygame](https://www.pygame.org/)
+- [tqdm](https://github.com/tqdm/tqdm)
+- [vis_nav_game](https://pypi.org/project/vis-nav-game/)
 
-\section{Separate Code (Load \& A*)}
-Here is a second script that \emph{loads} the grid, treats \verb|-1| or \verb|1| as free and \verb|0| as blocked, then runs A*:
-\begin{lstlisting}[language=Python]
-# main_run_planner.py
+Install dependencies with:
 
-occ = np.load("my_occupancy_map.npy")
-free_cells = np.argwhere( (occ==1) | (occ==-1) )
-start = tuple(random.choice(free_cells))
-goal  = tuple(random.choice(free_cells))
-path  = astar_occupancy(occ, start, goal)
-\end{lstlisting}
-
-\vspace{1em}
-You can then plot or visualize the path in your preferred manner.
-
-\end{document}
+```bash
+pip install numpy opencv-python matplotlib scikit-image pygame tqdm vis_nav_game
+```
