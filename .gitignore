@@ -1,1 +1,10 @@
 \my_occupancy_map.npy
+/Data/
+/pointcloud/pointcloud_gq
+/pointcloud/pointcloud_hos
+
+/pointcloud/occupancy_map_dilated.npy
+/pointcloud/occupancy_map_raw.npy
+/pointcloud/occupancy_maps.png
+
+simulator/data
