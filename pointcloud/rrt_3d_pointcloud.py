@@ -19,7 +19,7 @@ def expand_obstacles_3d(occupancy, safety_voxels=2):
     return expanded.astype(np.uint8)
 
 #############################################
-# 2. RRT-based 3D Path Planning
+# 2. RRT-based 3D Path Planning (with Z-limit)
 #############################################
 
 def collision_free(occupancy, p1, p2, interp_resolution=0.5):
@@ -34,6 +34,7 @@ def collision_free(occupancy, p1, p2, interp_resolution=0.5):
     for t in np.linspace(0, 1, n_steps):
         pt = p1 + t*(p2 - p1)
         idx = tuple(np.round(pt).astype(int))
+        # Check bounds
         if (idx[0] < 0 or idx[0] >= occupancy.shape[0] or
             idx[1] < 0 or idx[1] >= occupancy.shape[1] or
             idx[2] < 0 or idx[2] >= occupancy.shape[2]):
@@ -42,24 +43,30 @@ def collision_free(occupancy, p1, p2, interp_resolution=0.5):
             return False
     return True
 
-def rrt_3d(occupancy, start, goal, max_iter=5000000, step_size=20):
+def rrt_3d(occupancy, start, goal, max_iter=5000000, step_size=20, z_upper=None):
     """
-    A simple RRT planner in grid space.
+    A simple RRT planner in grid space, restricting z to be <= z_upper.
     occupancy: 3D numpy array (1=obstacle, 0=free).
     start, goal: grid indices (tuple of ints).
     max_iter: maximum iterations.
     step_size: maximum extension (in grid cells) per iteration.
+    z_upper: maximum z index to allow (if None, use full range).
     Returns a list of grid indices representing the path, or None if planning fails.
     """
-    print("running rrt planner: max_iter: ", max_iter, "step_size: ", step_size)
     dims = occupancy.shape
+    if z_upper is None or z_upper > dims[2]:
+        z_upper = dims[2]
+    print("running rrt planner: max_iter =", max_iter, 
+          "step_size =", step_size, "z_upper =", z_upper)
+    
     def sample_free():
+        # Sample random free cell, but limit z <= z_upper-1.
         while True:
-            idx = (np.random.randint(0, dims[0]),
-                   np.random.randint(0, dims[1]),
-                   np.random.randint(0, dims[2]))
-            if occupancy[idx] == 0:
-                return idx
+            ix = np.random.randint(0, dims[0])
+            iy = np.random.randint(0, dims[1])
+            iz = np.random.randint(0, z_upper)  # restricted z range
+            if occupancy[ix, iy, iz] == 0:
+                return (ix, iy, iz)
 
     tree = {start: None}
     nodes = [start]
@@ -73,9 +80,15 @@ def rrt_3d(occupancy, start, goal, max_iter=5000000, step_size=20):
             continue
         # Extend from nearest toward rand_node by step_size.
         if d > step_size:
-            new_node = tuple(np.round(np.array(nearest) + (vec / d) * step_size).astype(int))
+            new_node = np.round(np.array(nearest) + (vec / d) * step_size).astype(int)
         else:
-            new_node = rand_node
+            new_node = np.array(rand_node)
+        
+        # If new_node's z is beyond z_upper, skip it.
+        if new_node[2] >= z_upper:
+            continue
+        
+        new_node = tuple(new_node)
         if occupancy[new_node] == 1:
             continue
         if not collision_free(occupancy, nearest, new_node):
@@ -84,7 +97,8 @@ def rrt_3d(occupancy, start, goal, max_iter=5000000, step_size=20):
         nodes.append(new_node)
         # If new_node is close enough to the goal, try connecting directly.
         if np.linalg.norm(np.array(new_node) - np.array(goal)) <= step_size:
-            if collision_free(occupancy, new_node, goal):
+            # Also clamp goal's z if needed.
+            if goal[2] < z_upper and collision_free(occupancy, new_node, goal):
                 tree[goal] = new_node
                 path = []
                 current = goal
@@ -168,7 +182,7 @@ def animate_path_open3d(path_world, obstacles_pc, sleep_time=0.1, line_width=5.0
 
 if __name__ == "__main__":
     # Load the raw point cloud from file to build the occupancy grid.
-    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy"  # Adjust as needed.
+    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy"
     points = np.load(pc_file)
     if points.dtype.names is not None:
         points = np.vstack([points[name] for name in ('x', 'y', 'z')]).T
@@ -178,7 +192,6 @@ if __name__ == "__main__":
     # Compute occupancy grid from the point cloud.
     resolution = 0.2
     margin = 0.0  # No extra margin in occupancy grid generation.
-    # Compute the bounding box of the point cloud.
     aabb = pcd.get_axis_aligned_bounding_box()
     min_bound = aabb.min_bound
     max_bound = aabb.max_bound
@@ -196,8 +209,8 @@ if __name__ == "__main__":
     idxs = np.clip(idxs, 0, [nx-1, ny-1, nz-1])
     for ix, iy, iz in idxs:
         occupancy[ix, iy, iz] = 1
-    global_min = min_bound  # Use the point cloud's min bound as global_min.
-    print(f"Occupancy grid created with shape {occupancy.shape}. Global min: {global_min}")
+    global_min = min_bound
+    print(f"Occupancy grid shape {occupancy.shape}. global_min: {global_min}")
     
     # Expand obstacles for planning.
     safety_voxels = 2
@@ -213,7 +226,6 @@ if __name__ == "__main__":
     goal_idx = tuple(free_cells[1])
     print("Random Grid start:", start_idx, "Random Grid goal:", goal_idx)
     
-    # Debug: Visualize the occupancy grid, start, and goal before planning.
     # Create a point cloud from the original occupancy grid (undilated) for visualization.
     occ_indices = np.argwhere(occupancy == 1)
     max_obstacles = 10000
@@ -225,7 +237,7 @@ if __name__ == "__main__":
     obstacles_pc.points = o3d.utility.Vector3dVector(occ_points)
     obstacles_pc.paint_uniform_color([1, 0, 0])  # Red obstacles.
     
-    # Create blue and green spheres for start and goal.
+    # Show the random start and goal in a debug visualization (before planning).
     start_marker = o3d.geometry.TriangleMesh.create_sphere(radius=7)
     start_marker.paint_uniform_color([0, 0, 1])  # Blue
     start_marker.compute_vertex_normals()
@@ -244,9 +256,15 @@ if __name__ == "__main__":
     vis_debug.run()
     vis_debug.destroy_window()
     
-    # Run RRT planning on the safety occupancy grid.
+    # Restrict the z-range to 2/3 of the total height (in grid cells).
+    # So the RRT won't attempt to sample above that fraction.
+    z_upper = int(nz * (2.0/3.0))
+    print(f"Restricting z range to [0, {z_upper}) out of {nz}.")
+    
+    # RRT planning on the safety occupancy grid with the z-limit.
     start_time = time.time()
-    path_indices = rrt_3d(occupancy_safety, start_idx, goal_idx, max_iter=500000000, step_size=100)
+    path_indices = rrt_3d(occupancy_safety, start_idx, goal_idx,
+                          max_iter=5000000, step_size=20, z_upper=z_upper)
     end_time = time.time()
     print("RRT search took {:.2f} seconds.".format(end_time - start_time))
     if path_indices is None:
