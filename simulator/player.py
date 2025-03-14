@@ -495,11 +495,11 @@ if __name__=="__main__":
         plt.axis('off')
         plt.show()
 
-    # --- Enhanced Point Cloud Generation and Processing ---
+    # --- Basic Point Cloud Generation and Visualization ---
     if len(player.mapping_data) > 1:
         all_points = []
         path_points = []  # To store robot path points for visualization
-        print("Building enhanced point cloud from mapping data...")
+        print("Building basic point cloud from mapping data...")
         
         # Add robot path points for visualization
         for t_stamp, state, _ in player.mapping_data:
@@ -516,7 +516,7 @@ if __name__=="__main__":
             if baseline < MIN_BASELINE:
                 continue
             
-            # IMPORTANT: We generate stereo point cloud using consecutive frames
+            # Generate stereo point cloud using consecutive frames
             local_points = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
             
             if len(local_points) > 0:
@@ -546,122 +546,31 @@ if __name__=="__main__":
                 homogeneous_points[:, :3] = local_points
                 world_points = (homogeneous_points @ world_transform.T)[:, :3]
                 
-                # Filter out points that are too far from the robot path
-                # This helps remove outliers from the stereo matching
-                max_distance = 5.0  # Increased distance to capture more of the environment
-                filtered_points = []
-                for point in world_points:
-                    x, y, z = point
-                    dist_to_robot = np.linalg.norm(point[:2] - mid_state[:2].flatten())
-                    if dist_to_robot < max_distance:
-                        filtered_points.append(point)
-                
                 # Add to overall point cloud
-                if filtered_points:
-                    all_points.extend(filtered_points)
-                    print(f"Frame {i}: Added {len(filtered_points)} points to world frame")
+                all_points.extend(world_points)
+                print(f"Frame {i}: Added {len(world_points)} points to world frame")
         
-        print(f"Total raw points generated: {len(all_points)}")
+        print(f"Total points generated: {len(all_points)}")
         
         if len(all_points) > 0:
             # Convert to numpy array for processing
             all_points = np.array(all_points)
             
-            # ENHANCEMENT 1: Project all points to the ground plane (z=0)
-            # This is useful for 2D path planning
+            # Project all points to the ground plane (optional, remove if not desired)
             all_points[:, 2] = 0
             
-            # Create an initial point cloud
+            # Save the basic point cloud to NPY file
+            np.save("basic_point_cloud.npy", all_points)
+            print("Saved basic point cloud to 'basic_point_cloud.npy'")
+            
+            # Create point cloud for visualization
             pc = o3d.geometry.PointCloud()
             pc.points = o3d.utility.Vector3dVector(all_points)
             
-            # ENHANCEMENT 2: Voxel grid downsampling for uniform density
-            # This helps with the sparsity by creating a more uniform point distribution
-            voxel_size = 0.1  # Adjust based on your environment scale
-            pc_down = pc.voxel_down_sample(voxel_size)
+            # Add colors for visualization
+            pc.paint_uniform_color([0, 0.8, 0])  # Green for point cloud
             
-            # ENHANCEMENT 3: Statistical outlier removal
-            pc_filtered, _ = pc_down.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-            
-            # ENHANCEMENT 4: Normal estimation (helps with surface reconstruction)
-            pc_filtered.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.3, max_nn=30))
-            
-            # ENHANCEMENT 5: Density enhancement for path planning
-            # We'll create wall-like structures by extruding points based on robot orientation at each position
-            wall_points = []
-            side_distances = [1.0, 1.5, 2.0, 2.5]  # Multiple wall distances for density
-            
-            for t_stamp, state, _ in player.mapping_data:
-                x, y, theta = state.flatten()
-                
-                # Create points perpendicular to robot direction (simulating walls)
-                for dist in side_distances:
-                    # Left wall
-                    left_x = x - dist * math.sin(theta)
-                    left_y = y + dist * math.cos(theta)
-                    wall_points.append([left_x, left_y, 0])
-                    
-                    # Right wall
-                    right_x = x + dist * math.sin(theta)
-                    right_y = y - dist * math.cos(theta)
-                    wall_points.append([right_x, right_y, 0])
-            
-# --- Part where we left off, continuing with wall point cloud handling ---
-            # Add the wall points to our existing point cloud
-            if wall_points:
-                wall_points = np.array(wall_points)
-                wall_pc = o3d.geometry.PointCloud()
-                wall_pc.points = o3d.utility.Vector3dVector(wall_points)
-                
-                # Merge the original and wall point clouds
-                enhanced_pc = pc_filtered + wall_pc
-                
-                # Final voxel downsampling for uniformity
-                enhanced_pc = enhanced_pc.voxel_down_sample(voxel_size)
-            else:
-                enhanced_pc = pc_filtered
-            
-            # Get the points back as numpy array
-            enhanced_points = np.asarray(enhanced_pc.points)
-            print(f"Total enhanced points: {len(enhanced_points)}")
-            
-            # Save the enhanced point cloud to NPY file
-            np.save("enhanced_point_cloud.npy", enhanced_points)
-            print("Saved enhanced point cloud to 'enhanced_point_cloud.npy'")
-            
-            # ENHANCEMENT 6: Convert point cloud to occupancy grid for path planning
-            # Define grid parameters
-            grid_resolution = 0.2  # meters per cell
-            x_min, y_min = np.min(enhanced_points[:, :2], axis=0) - 1.0
-            x_max, y_max = np.max(enhanced_points[:, :2], axis=0) + 1.0
-            
-            grid_width = int((x_max - x_min) / grid_resolution)
-            grid_height = int((y_max - y_min) / grid_resolution)
-            
-            # Create occupancy grid (1 = occupied, 0 = free)
-            occupancy_grid = np.zeros((grid_height, grid_width), dtype=np.uint8)
-            
-            # Fill in occupied cells
-            for point in enhanced_points:
-                x, y = point[:2]
-                grid_x = int((x - x_min) / grid_resolution)
-                grid_y = int((y - y_min) / grid_resolution)
-                
-                if 0 <= grid_x < grid_width and 0 <= grid_y < grid_height:
-                    occupancy_grid[grid_y, grid_x] = 1
-            
-            # Dilate the occupied cells to ensure walls are thick enough
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            occupancy_grid = cv2.dilate(occupancy_grid, kernel, iterations=2)
-            
-            # Invert the grid for path planning (1 = free, 0 = occupied)
-            planning_grid = 1 - occupancy_grid
-            
-            # Save the occupancy grid
-            np.save("occupancy_grid.npy", planning_grid)
-            print("Saved occupancy grid to 'occupancy_grid.npy'")
-            
-            # Visualize the point cloud with the robot path
+            # Create robot path for visualization
             path_points = np.array(path_points)
             lines = [[i, i+1] for i in range(len(path_points)-1)]
             line_set = o3d.geometry.LineSet()
@@ -669,72 +578,9 @@ if __name__=="__main__":
             line_set.lines = o3d.utility.Vector2iVector(lines)
             line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])  # Red lines
             
-            # Visualize the enhanced point cloud
-            enhanced_pc.paint_uniform_color([0, 0.8, 0])  # Green for enhanced cloud
-            print("Displaying enhanced point cloud with robot path in Open3D.")
-            o3d.visualization.draw_geometries([enhanced_pc, line_set])
-            
-            # Visualize the occupancy grid
-            plt.figure(figsize=(10, 10))
-            plt.imshow(planning_grid, cmap='gray', origin='lower')
-            plt.title("Occupancy Grid for Path Planning (White = Free Space)")
-            
-            # Plot the robot path on the occupancy grid
-            robot_path_grid = []
-            for point in path_points:
-                x, y = point[:2]
-                grid_x = int((x - x_min) / grid_resolution)
-                grid_y = int((y - y_min) / grid_resolution)
-                if 0 <= grid_x < grid_width and 0 <= grid_y < grid_height:
-                    robot_path_grid.append((grid_x, grid_y))
-            
-            if robot_path_grid:
-                robot_path_grid = np.array(robot_path_grid)
-                plt.plot(robot_path_grid[:, 0], robot_path_grid[:, 1], 'r-', linewidth=2)
-            
-            plt.savefig("occupancy_grid.png", dpi=300)
-            plt.show()
-            
-            # Run a sample path planning to demonstrate
-            if len(robot_path_grid) >= 2:
-                # Use the first and last points of the robot path as start and goal
-                start = tuple(robot_path_grid[0])
-                goal = tuple(robot_path_grid[-1])
-                
-                # Ensure the start and goal are in free space
-                if planning_grid[goal[1], goal[0]] == 0:
-                    print("Goal is in occupied space, finding nearest free space...")
-                    # Find nearest free space
-                    kernel = np.ones((5, 5), np.uint8)
-                    dilated = cv2.dilate(planning_grid, kernel, iterations=1)
-                    if np.max(dilated) > 0:
-                        free_spaces = np.argwhere(dilated > 0)
-                        distances = np.sum((free_spaces - np.array(goal)[::-1])**2, axis=1)
-                        closest_idx = np.argmin(distances)
-                        goal = tuple(free_spaces[closest_idx][::-1])
-                
-                # Ensure the planning grid is in the right format for A* (1 = free)
-                planning_grid = planning_grid.astype(np.uint8)
-                
-                print(f"Planning path from {start} to {goal}")
-                # Use A* to find a path
-                path = astar_white(planning_grid * 255, start, goal)
-                
-                if path is not None:
-                    print(f"Path found with {len(path)} waypoints")
-                    path = np.array(path)
-                    plt.figure(figsize=(10, 10))
-                    plt.imshow(planning_grid, cmap='gray', origin='lower')
-                    plt.plot(robot_path_grid[:, 0], robot_path_grid[:, 1], 'r-', linewidth=2, label='Robot Path')
-                    plt.plot(path[:, 1], path[:, 0], 'b-', linewidth=2, label='Planned Path')
-                    plt.scatter(start[0], start[1], color='green', s=100, label='Start')
-                    plt.scatter(goal[0], goal[1], color='purple', s=100, label='Goal')
-                    plt.title("Path Planning Result")
-                    plt.legend()
-                    plt.savefig("planned_path.png", dpi=300)
-                    plt.show()
-                else:
-                    print("Could not find a path between start and goal points")
+            # Visualize point cloud and robot path
+            print("Displaying basic point cloud with robot path in Open3D.")
+            o3d.visualization.draw_geometries([pc, line_set])
         else:
             print("No point cloud data generated from mapping data.")
     else:
