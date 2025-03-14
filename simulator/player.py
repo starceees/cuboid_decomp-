@@ -156,12 +156,102 @@ def get_points(distance_map, image_arr):
     return points
 
 def build_stereo_point_cloud(prev_img, curr_img, baseline, K):
+    """Generate a point cloud from stereo images in the camera frame"""
     left_img_arr = prev_img.copy()
     right_img_arr = curr_img.copy()
     disparity = get_disparity_map(left_img_arr, right_img_arr, OFFSET)
     distances = get_distance_map(disparity, baseline, K)
     pts = get_points(distances, right_img_arr)
-    return pts
+    return np.array(pts) if pts else np.array([])
+
+def get_transform_matrix(state):
+    """Create a transformation matrix from robot state to world coordinates"""
+    x, y, theta = state.flatten()
+    # Create the transformation matrix (rotation + translation)
+    transform = np.array([
+        [math.cos(theta), -math.sin(theta), 0, x],
+        [math.sin(theta), math.cos(theta), 0, y],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
+    return transform
+
+def transform_points(points, transform_matrix):
+    """Transform points from camera frame to world frame"""
+    if len(points) == 0:
+        return np.array([])
+    
+    # Convert to homogeneous coordinates
+    homogeneous_points = np.ones((len(points), 4))
+    homogeneous_points[:, :3] = points
+    
+    # Apply transformation
+    transformed_points = homogeneous_points @ transform_matrix.T
+    
+    # Convert back from homogeneous coordinates
+    return transformed_points[:, :3]
+
+# Helper function for A* path planning
+def astar_white(grid, start, goal):
+    """
+    A* path planning on a grid with white (255) as free cells.
+    Returns a list of (i,j) indices forming the path from start to goal.
+    """
+    # Helpers
+    def heuristic(a, b):
+        # Manhattan distance
+        return abs(a[0] - b[0]) + abs(a[1] - b[1])
+    
+    def neighbors(node):
+        # Define 8-connected neighborhood
+        dirs = [(0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]
+        result = []
+        for d in dirs:
+            neighbor = (node[0] + d[0], node[1] + d[1])
+            if (0 <= neighbor[0] < grid.shape[0] and 
+                0 <= neighbor[1] < grid.shape[1] and 
+                grid[neighbor] == 255):
+                result.append(neighbor)
+        return result
+    
+    # Initialize data structures
+    frontier = [(0, start)]  # Priority queue: (f_score, node)
+    came_from = {}
+    g_score = {start: 0}
+    f_score = {start: heuristic(start, goal)}
+    explored = set()
+    
+    while frontier:
+        _, current = min(frontier)
+        frontier.remove((f_score[current], current))
+        
+        if current == goal:
+            # Reconstruct path
+            path = [current]
+            while current in came_from:
+                current = came_from[current]
+                path.append(current)
+            path.reverse()
+            return path
+        
+        explored.add(current)
+        
+        for next_node in neighbors(current):
+            if next_node in explored:
+                continue
+                
+            tentative_g = g_score[current] + 1
+            
+            if next_node not in g_score or tentative_g < g_score[next_node]:
+                came_from[next_node] = current
+                g_score[next_node] = tentative_g
+                f_score[next_node] = tentative_g + heuristic(next_node, goal)
+                
+                # Update the frontier
+                frontier = [(f, n) for f, n in frontier if n != next_node]
+                frontier.append((f_score[next_node], next_node))
+        
+    return None  # No path found
 
 # -------------------------------------------------------------------------
 # Main Player Class: EKF + Visual Measurement + Data Logging
@@ -345,58 +435,6 @@ class KeyboardPlayerPyGame(Player):
         return T
 
 # -------------------------------------------------------------------------
-# Point Cloud Generation Functions
-# -------------------------------------------------------------------------
-def get_disparity_map(left_img_arr, right_img_arr, edge_offset):
-    gray_left = cv2.cvtColor(left_img_arr, cv2.COLOR_BGR2GRAY)
-    gray_right = cv2.cvtColor(right_img_arr, cv2.COLOR_BGR2GRAY)
-    stereo = cv2.StereoBM_create(numDisparities=16*6, blockSize=15)
-    disparity = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
-    disparity = disparity[edge_offset:-edge_offset, edge_offset:-edge_offset]
-    return disparity
-
-def get_distance_map(disparity_map, baseline, K):
-    focal = K[0,0]
-    H, W = disparity_map.shape
-    distance_map = np.zeros((H, W), dtype=np.float32)
-    for i in range(H):
-        for j in range(W):
-            d = disparity_map[i, j]
-            if d == 0:
-                distance_map[i, j] = 0
-            else:
-                distance_map[i, j] = (focal * baseline) / d
-    distances = np.zeros((H, W, 3), dtype=np.float32)
-    cx = K[0,2]
-    cy = K[1,2]
-    for i in range(H):
-        for j in range(W):
-            Z = distance_map[i, j]
-            X = (j - cx) * Z / focal
-            Y = (i - cy) * Z / focal
-            distances[i, j] = [X, Y, Z]
-    return distances
-
-def get_points(distance_map, image_arr):
-    points = []
-    H, W, _ = distance_map.shape
-    for i in range(OFFSET, H - OFFSET):
-        for j in range(OFFSET, W - OFFSET):
-            X, Y, Z = distance_map[i, j]
-            if Z == 0 or math.isnan(X) or math.isnan(Y) or math.isnan(Z):
-                continue
-            points.append([X, Y, Z])
-    return points
-
-def build_stereo_point_cloud(prev_img, curr_img, baseline, K):
-    left_img_arr = prev_img.copy()
-    right_img_arr = curr_img.copy()
-    disparity = get_disparity_map(left_img_arr, right_img_arr, OFFSET)
-    distances = get_distance_map(disparity, baseline, K)
-    pts = get_points(distances, right_img_arr)
-    return pts
-
-# -------------------------------------------------------------------------
 # MAIN
 # -------------------------------------------------------------------------
 if __name__=="__main__":
@@ -457,28 +495,75 @@ if __name__=="__main__":
         plt.axis('off')
         plt.show()
 
-    # --- Point Cloud Generation and Visualization ---
+    # --- Point Cloud Generation and Visualization (UPDATED) ---
     if len(player.mapping_data) > 1:
         all_points = []
+        path_points = []  # To store robot path points for visualization
         print("Building point cloud from mapping data...")
+        
+        # Add robot path points for visualization
+        for t_stamp, state, _ in player.mapping_data:
+            x, y, _ = state.flatten()
+            path_points.append([x, y, 0])  # Z=0 for robot path
+        
+        # Process each pair of consecutive frames for stereo point cloud
         for i in range(1, len(player.mapping_data)):
             t_prev, state_prev, img_prev = player.mapping_data[i-1]
             t_curr, state_curr, img_curr = player.mapping_data[i]
-            baseline = np.linalg.norm(state_curr[:2] - state_prev[:2])
+            
+            # Calculate baseline between frames
+            baseline = np.linalg.norm(state_curr[:2].flatten() - state_prev[:2].flatten())
             if baseline < MIN_BASELINE:
                 continue
-            pts = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
-            if pts is not None:
-                all_points.extend(pts)
+            
+            # Get points in the local camera frame
+            local_points = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
+            
+            if len(local_points) > 0:
+                # Create transformation matrix from camera to world coordinates
+                # We use the current robot state for this transformation
+                world_transform = get_transform_matrix(state_curr)
+                
+                # Apply transformation to get points in world frame
+                world_points = transform_points(local_points, world_transform)
+                
+                # Add to overall point cloud
+                all_points.extend(world_points)
+                
+                print(f"Frame {i}: Added {len(world_points)} points to world frame")
+        
         print(f"Total points generated: {len(all_points)}")
+        
         if len(all_points) > 0:
+            # Create point cloud from environment points
             all_points = np.array(all_points)
-            # Project all points onto the x-y plane (set z=0)
-            all_points[:,2] = 0
             pc = o3d.geometry.PointCloud()
             pc.points = o3d.utility.Vector3dVector(all_points)
-            print("Displaying point cloud in Open3D.")
-            o3d.visualization.draw_geometries([pc])
+            
+            # Add colors to points based on height
+            colors = np.zeros((len(all_points), 3))
+            z_values = all_points[:, 2]
+            z_min, z_max = np.min(z_values), np.max(z_values)
+            if z_max > z_min:
+                normalized_z = (z_values - z_min) / (z_max - z_min)
+                colors[:, 0] = 1 - normalized_z  # Red decreases with height
+                colors[:, 1] = normalized_z      # Green increases with height
+                pc.colors = o3d.utility.Vector3dVector(colors)
+            
+            # Create robot path line set for visualization
+            path_points = np.array(path_points)
+            lines = [[i, i+1] for i in range(len(path_points)-1)]
+            line_set = o3d.geometry.LineSet()
+            line_set.points = o3d.utility.Vector3dVector(path_points)
+            line_set.lines = o3d.utility.Vector2iVector(lines)
+            line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])  # Red lines
+            
+            # Optional: statistical outlier removal for cleaner visualization
+            pc, _ = pc.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+            
+            # Visualize point cloud and robot path together
+            print("Displaying point cloud with robot path in Open3D.")
+            o3d.visualization.draw_geometries([pc, line_set])
         else:
             print("No point cloud data generated from mapping data.")
     else:
@@ -511,75 +596,4 @@ if __name__=="__main__":
             ry = Y - CORRIDOR_OFFSET * math.cos(theta)
             iR, jR = dynamic_world_to_map(rx, ry, origin_dynamic, OCC_RESOLUTION)
             if 0 <= iR < grid_h and 0 <= jR < grid_w:
-                occ_map_fine[iR,jR] = WALL_VAL
-
-        merged_occ = merge_occupancy_grid(occ_map_fine, NEW_RESOLUTION)
-        # For planning, consider only PATH cells as free (white = 255), others as blocked (0)
-        planning_img = np.where(merged_occ == PATH_VAL, 255, 0).astype(np.uint8)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
-        planning_img = cv2.dilate(planning_img, kernel, iterations=1)
-        plt.figure(figsize=(8,8))
-        plt.imshow(planning_img, origin='lower', cmap='gray')
-        plt.title("Merged Occupancy Grid for Planning (White=free)")
-        plt.show()
-
-        free_cells = np.argwhere(planning_img == 255)
-        if len(free_cells) < 2:
-            print("Not enough free cells in merged grid for A* planning.")
-        else:
-            sidx = tuple(random.choice(free_cells))
-            gidx = tuple(random.choice(free_cells))
-            print(f"Random start index: {sidx}, Random goal index: {gidx}")
-            plan = astar_white(planning_img, sidx, gidx)
-            if plan is None:
-                print("A* could not find a path on the merged grid.")
-            else:
-                plan_world = []
-                for (i, j) in plan:
-                    xw = j * NEW_RESOLUTION + origin_dynamic[0] + NEW_RESOLUTION/2.0
-                    yw = i * NEW_RESOLUTION + origin_dynamic[1] + NEW_RESOLUTION/2.0
-                    plan_world.append((xw, yw))
-                plan_world = np.array(plan_world)
-                plt.figure(figsize=(8,8))
-                extent = [origin_dynamic[0], origin_dynamic[0] + merged_occ.shape[1]*NEW_RESOLUTION,
-                          origin_dynamic[1], origin_dynamic[1] + merged_occ.shape[0]*NEW_RESOLUTION]
-                plt.imshow(planning_img, origin='lower', cmap='gray', extent=extent)
-                plt.plot(plan_world[:,0], plan_world[:,1], 'b.-', label="A* Path")
-                plt.title("Merged Occupancy Grid with A* Path")
-                plt.legend()
-                plt.show()
-
-    # --- Display Path and State vs. Time ---
-    if len(player.path) > 0:
-        path_arr = np.array(player.path)
-        plt.figure(figsize=(10,8))
-        plt.plot(path_arr[:,1], path_arr[:,2], '-o', markersize=3, label='Path')
-        plt.xlabel('X (m)')
-        plt.ylabel('Y (m)')
-        plt.title('2D Path Followed')
-        plt.axis('equal')
-        plt.grid(True)
-        plt.legend()
-        plt.show()
-
-        fig, ax1 = plt.subplots(figsize=(10,4))
-        ax1.plot(path_arr[:,0], path_arr[:,1], '-o', markersize=3, label='X')
-        ax1.plot(path_arr[:,0], path_arr[:,2], '-o', markersize=3, label='Y')
-        ax1.set_xlabel('Time (s)')
-        ax1.set_ylabel('Position (m)')
-        ax1.set_title('Position vs. Time')
-        ax1.legend()
-        ax1.grid(True)
-        plt.tight_layout()
-        plt.show()
-
-        plt.figure(figsize=(10,4))
-        plt.plot(path_arr[:,0], np.degrees(path_arr[:,3]), '-o', markersize=3, color='red')
-        plt.xlabel('Time (s)')
-        plt.ylabel('Orientation (°)')
-        plt.title('Orientation vs. Time')
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-    else:
-        print("No path data recorded.")
+                occ_map_fine[iR,jR] = WALL_
