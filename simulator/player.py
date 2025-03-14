@@ -495,16 +495,44 @@ if __name__=="__main__":
         plt.axis('off')
         plt.show()
 
-    # --- Point Cloud Generation and Visualization (UPDATED) ---
+    # --- Point Cloud Generation and Visualization with Ground Plane Alignment ---
     if len(player.mapping_data) > 1:
         all_points = []
         path_points = []  # To store robot path points for visualization
         print("Building point cloud from mapping data...")
         
-        # Add robot path points for visualization
+        # First, compute the average Z-value to use as ground plane
+        avg_z = 0
+        count = 0
+        
+        # Get the heights of some initial points to determine ground plane
+        for i in range(1, min(10, len(player.mapping_data))):
+            if i >= len(player.mapping_data):
+                break
+                
+            t_prev, state_prev, img_prev = player.mapping_data[i-1]
+            t_curr, state_curr, img_curr = player.mapping_data[i]
+            
+            baseline = np.linalg.norm(state_curr[:2].flatten() - state_prev[:2].flatten())
+            if baseline < MIN_BASELINE:
+                continue
+                
+            local_points = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
+            if len(local_points) > 0:
+                avg_z += np.mean(local_points[:, 2])
+                count += 1
+        
+        if count > 0:
+            avg_z /= count
+        else:
+            avg_z = 0
+        
+        print(f"Ground plane Z-value: {avg_z}")
+        
+        # Add robot path points for visualization - using the same ground plane Z
         for t_stamp, state, _ in player.mapping_data:
             x, y, _ = state.flatten()
-            path_points.append([x, y, 0])  # Z=0 for robot path
+            path_points.append([x, y, avg_z])  # Use the same Z as the point cloud
         
         # Process each pair of consecutive frames for stereo point cloud
         for i in range(1, len(player.mapping_data)):
@@ -520,8 +548,7 @@ if __name__=="__main__":
             local_points = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
             
             if len(local_points) > 0:
-                # The important change: Create a transformation specific to this frame pair
-                # We'll use the MIDPOINT between prev and curr states for better localization
+                # Use the midpoint between states for better localization
                 mid_state = np.zeros((3, 1))
                 mid_state[0, 0] = (state_prev[0, 0] + state_curr[0, 0]) / 2  # X midpoint
                 mid_state[1, 0] = (state_prev[1, 0] + state_curr[1, 0]) / 2  # Y midpoint
@@ -538,17 +565,20 @@ if __name__=="__main__":
                     [0, 0, 1]
                 ])
                 
-                # Translation component (X, Y, Z=0)
+                # Translation component (X, Y, Z=avg_z) - using the ground plane Z
                 world_transform[0, 3] = mid_state[0, 0]
                 world_transform[1, 3] = mid_state[1, 0]
+                world_transform[2, 3] = 0  # Keep all points at Z=0
                 
                 # Transform local points to world frame
                 homogeneous_points = np.ones((len(local_points), 4))
                 homogeneous_points[:, :3] = local_points
                 world_points = (homogeneous_points @ world_transform.T)[:, :3]
                 
+                # Force Z coordinate to be at ground plane
+                world_points[:, 2] = avg_z
+                
                 # Filter out points that are too far from the robot path
-                # This helps remove outliers from the stereo matching
                 max_distance = 3.0  # Maximum distance from robot path in meters
                 filtered_points = []
                 for point in world_points:
@@ -568,6 +598,9 @@ if __name__=="__main__":
             # Create point cloud from environment points
             all_points = np.array(all_points)
             
+            # Force all points to the same Z plane for better visualization
+            all_points[:, 2] = avg_z
+            
             # Save the point cloud to a NPY file
             np.save("point_cloud.npy", all_points)
             print("Point cloud saved to 'point_cloud.npy'")
@@ -575,34 +608,35 @@ if __name__=="__main__":
             pc = o3d.geometry.PointCloud()
             pc.points = o3d.utility.Vector3dVector(all_points)
             
-            # Add colors to points based on height
-            colors = np.zeros((len(all_points), 3))
-            z_values = all_points[:, 2]
-            z_min, z_max = np.min(z_values), np.max(z_values)
-            if z_max > z_min:
-                normalized_z = (z_values - z_min) / (z_max - z_min)
-                colors[:, 0] = 1 - normalized_z  # Red decreases with height
-                colors[:, 1] = normalized_z      # Green increases with height
-                pc.colors = o3d.utility.Vector3dVector(colors)
+            # Use a uniform red color for point cloud
+            pc.paint_uniform_color([1, 0, 0])  # Red for point cloud
             
-            # Create robot path line set for visualization
+            # Create robot path line set for visualization - using the same Z plane
             path_points = np.array(path_points)
+            
+            # Force path to the same Z plane as points
+            path_points[:, 2] = avg_z
+            
             lines = [[i, i+1] for i in range(len(path_points)-1)]
             line_set = o3d.geometry.LineSet()
             line_set.points = o3d.utility.Vector3dVector(path_points)
             line_set.lines = o3d.utility.Vector2iVector(lines)
-            line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])  # Red lines
+            line_set.colors = o3d.utility.Vector3dVector([[0, 1, 0] for _ in range(len(lines))])  # Green lines
             
             # Optional: statistical outlier removal for cleaner visualization
             pc, _ = pc.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
             
+            # Create a sphere at the end of the path
+            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.5)
+            sphere.translate(path_points[-1])
+            sphere.paint_uniform_color([0, 0, 1])  # Blue sphere
+            
             # Visualize point cloud and robot path together
             print("Displaying point cloud with robot path in Open3D.")
-            o3d.visualization.draw_geometries([pc, line_set])
+            o3d.visualization.draw_geometries([pc, line_set, sphere])
         else:
             print("No point cloud data generated from mapping data.")
     else:
         print("Not enough mapping data for point cloud generation.")
     
     print("Done.")
-    
