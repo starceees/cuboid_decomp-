@@ -567,6 +567,11 @@ if __name__=="__main__":
         if len(all_points) > 0:
             # Create point cloud from environment points
             all_points = np.array(all_points)
+            
+            # Save the point cloud to a NPY file
+            np.save("point_cloud.npy", all_points)
+            print("Point cloud saved to 'point_cloud.npy'")
+            
             pc = o3d.geometry.PointCloud()
             pc.points = o3d.utility.Vector3dVector(all_points)
             
@@ -598,6 +603,6 @@ if __name__=="__main__":
             print("No point cloud data generated from mapping data.")
     else:
         print("Not enough mapping data for point cloud generation.")
-
+    
     print("Done.")
     
