@@ -495,13 +495,13 @@ if __name__=="__main__":
         plt.axis('off')
         plt.show()
 
-    # --- Point Cloud Generation and Visualization (With Fixed Ground Plane) ---
+    # --- Point Cloud Generation and Visualization (UPDATED) ---
     if len(player.mapping_data) > 1:
         all_points = []
         path_points = []  # To store robot path points for visualization
         print("Building point cloud from mapping data...")
         
-        # Add robot path points for visualization - all at Z=0
+        # Add robot path points for visualization
         for t_stamp, state, _ in player.mapping_data:
             x, y, _ = state.flatten()
             path_points.append([x, y, 0])  # Z=0 for robot path
@@ -541,15 +541,11 @@ if __name__=="__main__":
                 # Translation component (X, Y, Z=0)
                 world_transform[0, 3] = mid_state[0, 0]
                 world_transform[1, 3] = mid_state[1, 0]
-                world_transform[2, 3] = 0  # Keep Z translation at 0
                 
                 # Transform local points to world frame
                 homogeneous_points = np.ones((len(local_points), 4))
                 homogeneous_points[:, :3] = local_points
                 world_points = (homogeneous_points @ world_transform.T)[:, :3]
-                
-                # Simple adjustment: project all points to Z=0 plane
-                world_points[:, 2] = 0  # Force all points to Z=0
                 
                 # Filter out points that are too far from the robot path
                 # This helps remove outliers from the stereo matching
@@ -571,16 +567,18 @@ if __name__=="__main__":
         if len(all_points) > 0:
             # Create point cloud from environment points
             all_points = np.array(all_points)
-            
-            # Save the point cloud to a NPY file
-            np.save("point_cloud.npy", all_points)
-            print("Point cloud saved to 'point_cloud.npy'")
-            
             pc = o3d.geometry.PointCloud()
             pc.points = o3d.utility.Vector3dVector(all_points)
             
             # Add colors to points based on height
-            pc.paint_uniform_color([1, 0, 0])  # Solid red for point cloud
+            colors = np.zeros((len(all_points), 3))
+            z_values = all_points[:, 2]
+            z_min, z_max = np.min(z_values), np.max(z_values)
+            if z_max > z_min:
+                normalized_z = (z_values - z_min) / (z_max - z_min)
+                colors[:, 0] = 1 - normalized_z  # Red decreases with height
+                colors[:, 1] = normalized_z      # Green increases with height
+                pc.colors = o3d.utility.Vector3dVector(colors)
             
             # Create robot path line set for visualization
             path_points = np.array(path_points)
@@ -588,22 +586,17 @@ if __name__=="__main__":
             line_set = o3d.geometry.LineSet()
             line_set.points = o3d.utility.Vector3dVector(path_points)
             line_set.lines = o3d.utility.Vector2iVector(lines)
-            line_set.colors = o3d.utility.Vector3dVector([[0, 1, 0] for _ in range(len(lines))])  # Green lines
+            line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])  # Red lines
             
             # Optional: statistical outlier removal for cleaner visualization
             pc, _ = pc.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
             
-            # Create a sphere at the end of the path for visualization
-            sphere = o3d.geometry.TriangleMesh.create_sphere(radius=0.3)
-            sphere.translate(path_points[-1])
-            sphere.paint_uniform_color([0, 0, 1])  # Blue sphere
-            
             # Visualize point cloud and robot path together
             print("Displaying point cloud with robot path in Open3D.")
-            o3d.visualization.draw_geometries([pc, line_set, sphere])
+            o3d.visualization.draw_geometries([pc, line_set])
         else:
             print("No point cloud data generated from mapping data.")
     else:
         print("Not enough mapping data for point cloud generation.")
-    
+
     print("Done.")
