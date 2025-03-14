@@ -162,7 +162,7 @@ def build_stereo_point_cloud(prev_img, curr_img, baseline, K):
     disparity = get_disparity_map(left_img_arr, right_img_arr, OFFSET)
     distances = get_distance_map(disparity, baseline, K)
     pts = get_points(distances, right_img_arr)
-    return np.array(pts) if pts else np.array([])
+    return np.array(pts) if len(pts) > 0 else np.array([])
 
 def get_transform_matrix(state):
     """Create a transformation matrix from robot state to world coordinates"""
@@ -511,26 +511,56 @@ if __name__=="__main__":
             t_prev, state_prev, img_prev = player.mapping_data[i-1]
             t_curr, state_curr, img_curr = player.mapping_data[i]
             
-            # Calculate baseline between frames
+            # Calculate baseline between frames (distance moved)
             baseline = np.linalg.norm(state_curr[:2].flatten() - state_prev[:2].flatten())
             if baseline < MIN_BASELINE:
                 continue
             
-            # Get points in the local camera frame
+            # IMPORTANT: We generate stereo point cloud using consecutive frames
             local_points = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
             
             if len(local_points) > 0:
-                # Create transformation matrix from camera to world coordinates
-                # We use the current robot state for this transformation
-                world_transform = get_transform_matrix(state_curr)
+                # The important change: Create a transformation specific to this frame pair
+                # We'll use the MIDPOINT between prev and curr states for better localization
+                mid_state = np.zeros((3, 1))
+                mid_state[0, 0] = (state_prev[0, 0] + state_curr[0, 0]) / 2  # X midpoint
+                mid_state[1, 0] = (state_prev[1, 0] + state_curr[1, 0]) / 2  # Y midpoint
+                mid_state[2, 0] = (state_prev[2, 0] + state_curr[2, 0]) / 2  # Theta midpoint
                 
-                # Apply transformation to get points in world frame
-                world_points = transform_points(local_points, world_transform)
+                # Create a camera-to-world transform based on robot position
+                world_transform = np.eye(4)
+                theta = mid_state[2, 0]
+                
+                # Rotation component (around Z axis)
+                world_transform[0:3, 0:3] = np.array([
+                    [math.cos(theta), -math.sin(theta), 0],
+                    [math.sin(theta), math.cos(theta), 0],
+                    [0, 0, 1]
+                ])
+                
+                # Translation component (X, Y, Z=0)
+                world_transform[0, 3] = mid_state[0, 0]
+                world_transform[1, 3] = mid_state[1, 0]
+                
+                # Transform local points to world frame
+                homogeneous_points = np.ones((len(local_points), 4))
+                homogeneous_points[:, :3] = local_points
+                world_points = (homogeneous_points @ world_transform.T)[:, :3]
+                
+                # Filter out points that are too far from the robot path
+                # This helps remove outliers from the stereo matching
+                max_distance = 3.0  # Maximum distance from robot path in meters
+                filtered_points = []
+                for point in world_points:
+                    x, y, z = point
+                    dist_to_robot = np.linalg.norm(point[:2] - mid_state[:2].flatten())
+                    if dist_to_robot < max_distance:
+                        filtered_points.append(point)
                 
                 # Add to overall point cloud
-                all_points.extend(world_points)
-                
-                print(f"Frame {i}: Added {len(world_points)} points to world frame")
+                if filtered_points:
+                    all_points.extend(filtered_points)
+                    print(f"Frame {i}: Added {len(filtered_points)} points to world frame")
         
         print(f"Total points generated: {len(all_points)}")
         
@@ -575,25 +605,3 @@ if __name__=="__main__":
     else:
         path_arr = np.array(player.path)  # shape (N,4): [time, X, Y, theta]
         min_x, max_x = path_arr[:,1].min(), path_arr[:,1].max()
-        min_y, max_y = path_arr[:,2].min(), path_arr[:,2].max()
-        margin = 5.0
-        origin_dynamic = (min_x - margin, min_y - margin)
-        map_w = (max_x - min_x) + 2 * margin
-        map_h = (max_y - min_y) + 2 * margin
-        grid_w = int(map_w / OCC_RESOLUTION)
-        grid_h = int(map_h / OCC_RESOLUTION)
-        occ_map_fine = np.full((grid_h, grid_w), UNKNOWN_VAL, dtype=int)
-        for (_, X, Y, theta) in path_arr:
-            i, j = dynamic_world_to_map(X, Y, origin_dynamic, OCC_RESOLUTION)
-            if 0 <= i < grid_h and 0 <= j < grid_w:
-                occ_map_fine[i,j] = PATH_VAL
-            lx = X - CORRIDOR_OFFSET * math.sin(theta)
-            ly = Y + CORRIDOR_OFFSET * math.cos(theta)
-            iL, jL = dynamic_world_to_map(lx, ly, origin_dynamic, OCC_RESOLUTION)
-            if 0 <= iL < grid_h and 0 <= jL < grid_w:
-                occ_map_fine[iL,jL] = WALL_VAL
-            rx = X + CORRIDOR_OFFSET * math.sin(theta)
-            ry = Y - CORRIDOR_OFFSET * math.cos(theta)
-            iR, jR = dynamic_world_to_map(rx, ry, origin_dynamic, OCC_RESOLUTION)
-            if 0 <= iR < grid_h and 0 <= jR < grid_w:
-                occ_map_fine[iR,jR] = WALL_
