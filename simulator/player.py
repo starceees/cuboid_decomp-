@@ -495,11 +495,11 @@ if __name__=="__main__":
         plt.axis('off')
         plt.show()
 
-    # --- Point Cloud Generation and Visualization (UPDATED) ---
+    # --- Enhanced Point Cloud Generation and Processing ---
     if len(player.mapping_data) > 1:
         all_points = []
         path_points = []  # To store robot path points for visualization
-        print("Building point cloud from mapping data...")
+        print("Building enhanced point cloud from mapping data...")
         
         # Add robot path points for visualization
         for t_stamp, state, _ in player.mapping_data:
@@ -520,8 +520,7 @@ if __name__=="__main__":
             local_points = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
             
             if len(local_points) > 0:
-                # The important change: Create a transformation specific to this frame pair
-                # We'll use the MIDPOINT between prev and curr states for better localization
+                # Use the midpoint between states for better localization
                 mid_state = np.zeros((3, 1))
                 mid_state[0, 0] = (state_prev[0, 0] + state_curr[0, 0]) / 2  # X midpoint
                 mid_state[1, 0] = (state_prev[1, 0] + state_curr[1, 0]) / 2  # Y midpoint
@@ -549,7 +548,7 @@ if __name__=="__main__":
                 
                 # Filter out points that are too far from the robot path
                 # This helps remove outliers from the stereo matching
-                max_distance = 3.0  # Maximum distance from robot path in meters
+                max_distance = 5.0  # Increased distance to capture more of the environment
                 filtered_points = []
                 for point in world_points:
                     x, y, z = point
@@ -562,46 +561,52 @@ if __name__=="__main__":
                     all_points.extend(filtered_points)
                     print(f"Frame {i}: Added {len(filtered_points)} points to world frame")
         
-        print(f"Total points generated: {len(all_points)}")
+        print(f"Total raw points generated: {len(all_points)}")
         
         if len(all_points) > 0:
-            # Create point cloud from environment points
+            # Convert to numpy array for processing
             all_points = np.array(all_points)
+            
+            # ENHANCEMENT 1: Project all points to the ground plane (z=0)
+            # This is useful for 2D path planning
+            all_points[:, 2] = 0
+            
+            # Create an initial point cloud
             pc = o3d.geometry.PointCloud()
             pc.points = o3d.utility.Vector3dVector(all_points)
             
-            # Add colors to points based on height
-            colors = np.zeros((len(all_points), 3))
-            z_values = all_points[:, 2]
-            z_min, z_max = np.min(z_values), np.max(z_values)
-            if z_max > z_min:
-                normalized_z = (z_values - z_min) / (z_max - z_min)
-                colors[:, 0] = 1 - normalized_z  # Red decreases with height
-                colors[:, 1] = normalized_z      # Green increases with height
-                pc.colors = o3d.utility.Vector3dVector(colors)
+            # ENHANCEMENT 2: Voxel grid downsampling for uniform density
+            # This helps with the sparsity by creating a more uniform point distribution
+            voxel_size = 0.1  # Adjust based on your environment scale
+            pc_down = pc.voxel_down_sample(voxel_size)
             
-            # Create robot path line set for visualization
-            path_points = np.array(path_points)
-            lines = [[i, i+1] for i in range(len(path_points)-1)]
-            line_set = o3d.geometry.LineSet()
-            line_set.points = o3d.utility.Vector3dVector(path_points)
-            line_set.lines = o3d.utility.Vector2iVector(lines)
-            line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])  # Red lines
+            # ENHANCEMENT 3: Statistical outlier removal
+            pc_filtered, _ = pc_down.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
             
-            # Optional: statistical outlier removal for cleaner visualization
-            pc, _ = pc.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+            # ENHANCEMENT 4: Normal estimation (helps with surface reconstruction)
+            pc_filtered.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.3, max_nn=30))
             
-            # Visualize point cloud and robot path together
-            print("Displaying point cloud with robot path in Open3D.")
-            o3d.visualization.draw_geometries([pc, line_set])
-        else:
-            print("No point cloud data generated from mapping data.")
-    else:
-        print("Not enough mapping data for point cloud generation.")
-
-    # --- A* Path Planning on Merged Grid ---
-    if len(player.path) == 0:
-        print("No path data recorded.")
-    else:
-        path_arr = np.array(player.path)  # shape (N,4): [time, X, Y, theta]
-        min_x, max_x = path_arr[:,1].min(), path_arr[:,1].max()
+            # ENHANCEMENT 5: Density enhancement for path planning
+            # We'll create wall-like structures by extruding points based on robot orientation at each position
+            wall_points = []
+            side_distances = [1.0, 1.5, 2.0, 2.5]  # Multiple wall distances for density
+            
+            for t_stamp, state, _ in player.mapping_data:
+                x, y, theta = state.flatten()
+                
+                # Create points perpendicular to robot direction (simulating walls)
+                for dist in side_distances:
+                    # Left wall
+                    left_x = x - dist * math.sin(theta)
+                    left_y = y + dist * math.cos(theta)
+                    wall_points.append([left_x, left_y, 0])
+                    
+                    # Right wall
+                    right_x = x + dist * math.sin(theta)
+                    right_y = y - dist * math.cos(theta)
+                    wall_points.append([right_x, right_y, 0])
+            
+            # Add the wall points to our existing point cloud
+            if wall_points:
+                wall_points = np.array(wall_points)
+                wall_pc = o3d.geometry.PointCloud()
