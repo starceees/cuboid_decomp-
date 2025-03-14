@@ -606,7 +606,236 @@ if __name__=="__main__":
                     right_y = y - dist * math.cos(theta)
                     wall_points.append([right_x, right_y, 0])
             
+# --- Part where we left off, continuing with wall point cloud handling ---
             # Add the wall points to our existing point cloud
             if wall_points:
                 wall_points = np.array(wall_points)
                 wall_pc = o3d.geometry.PointCloud()
+                wall_pc.points = o3d.utility.Vector3dVector(wall_points)
+                
+                # Merge the original and wall point clouds
+                enhanced_pc = pc_filtered + wall_pc
+                
+                # Final voxel downsampling for uniformity
+                enhanced_pc = enhanced_pc.voxel_down_sample(voxel_size)
+            else:
+                enhanced_pc = pc_filtered
+            
+            # Get the points back as numpy array
+            enhanced_points = np.asarray(enhanced_pc.points)
+            print(f"Total enhanced points: {len(enhanced_points)}")
+            
+            # Save the enhanced point cloud to NPY file
+            np.save("enhanced_point_cloud.npy", enhanced_points)
+            print("Saved enhanced point cloud to 'enhanced_point_cloud.npy'")
+            
+            # ENHANCEMENT 6: Convert point cloud to occupancy grid for path planning
+            # Define grid parameters
+            grid_resolution = 0.2  # meters per cell
+            x_min, y_min = np.min(enhanced_points[:, :2], axis=0) - 1.0
+            x_max, y_max = np.max(enhanced_points[:, :2], axis=0) + 1.0
+            
+            grid_width = int((x_max - x_min) / grid_resolution)
+            grid_height = int((y_max - y_min) / grid_resolution)
+            
+            # Create occupancy grid (1 = occupied, 0 = free)
+            occupancy_grid = np.zeros((grid_height, grid_width), dtype=np.uint8)
+            
+            # Fill in occupied cells
+            for point in enhanced_points:
+                x, y = point[:2]
+                grid_x = int((x - x_min) / grid_resolution)
+                grid_y = int((y - y_min) / grid_resolution)
+                
+                if 0 <= grid_x < grid_width and 0 <= grid_y < grid_height:
+                    occupancy_grid[grid_y, grid_x] = 1
+            
+            # Dilate the occupied cells to ensure walls are thick enough
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            occupancy_grid = cv2.dilate(occupancy_grid, kernel, iterations=2)
+            
+            # Invert the grid for path planning (1 = free, 0 = occupied)
+            planning_grid = 1 - occupancy_grid
+            
+            # Save the occupancy grid
+            np.save("occupancy_grid.npy", planning_grid)
+            print("Saved occupancy grid to 'occupancy_grid.npy'")
+            
+            # Visualize the point cloud with the robot path
+            path_points = np.array(path_points)
+            lines = [[i, i+1] for i in range(len(path_points)-1)]
+            line_set = o3d.geometry.LineSet()
+            line_set.points = o3d.utility.Vector3dVector(path_points)
+            line_set.lines = o3d.utility.Vector2iVector(lines)
+            line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])  # Red lines
+            
+            # Visualize the enhanced point cloud
+            enhanced_pc.paint_uniform_color([0, 0.8, 0])  # Green for enhanced cloud
+            print("Displaying enhanced point cloud with robot path in Open3D.")
+            o3d.visualization.draw_geometries([enhanced_pc, line_set])
+            
+            # Visualize the occupancy grid
+            plt.figure(figsize=(10, 10))
+            plt.imshow(planning_grid, cmap='gray', origin='lower')
+            plt.title("Occupancy Grid for Path Planning (White = Free Space)")
+            
+            # Plot the robot path on the occupancy grid
+            robot_path_grid = []
+            for point in path_points:
+                x, y = point[:2]
+                grid_x = int((x - x_min) / grid_resolution)
+                grid_y = int((y - y_min) / grid_resolution)
+                if 0 <= grid_x < grid_width and 0 <= grid_y < grid_height:
+                    robot_path_grid.append((grid_x, grid_y))
+            
+            if robot_path_grid:
+                robot_path_grid = np.array(robot_path_grid)
+                plt.plot(robot_path_grid[:, 0], robot_path_grid[:, 1], 'r-', linewidth=2)
+            
+            plt.savefig("occupancy_grid.png", dpi=300)
+            plt.show()
+            
+            # Run a sample path planning to demonstrate
+            if len(robot_path_grid) >= 2:
+                # Use the first and last points of the robot path as start and goal
+                start = tuple(robot_path_grid[0])
+                goal = tuple(robot_path_grid[-1])
+                
+                # Ensure the start and goal are in free space
+                if planning_grid[goal[1], goal[0]] == 0:
+                    print("Goal is in occupied space, finding nearest free space...")
+                    # Find nearest free space
+                    kernel = np.ones((5, 5), np.uint8)
+                    dilated = cv2.dilate(planning_grid, kernel, iterations=1)
+                    if np.max(dilated) > 0:
+                        free_spaces = np.argwhere(dilated > 0)
+                        distances = np.sum((free_spaces - np.array(goal)[::-1])**2, axis=1)
+                        closest_idx = np.argmin(distances)
+                        goal = tuple(free_spaces[closest_idx][::-1])
+                
+                # Ensure the planning grid is in the right format for A* (1 = free)
+                planning_grid = planning_grid.astype(np.uint8)
+                
+                print(f"Planning path from {start} to {goal}")
+                # Use A* to find a path
+                path = astar_white(planning_grid * 255, start, goal)
+                
+                if path is not None:
+                    print(f"Path found with {len(path)} waypoints")
+                    path = np.array(path)
+                    plt.figure(figsize=(10, 10))
+                    plt.imshow(planning_grid, cmap='gray', origin='lower')
+                    plt.plot(robot_path_grid[:, 0], robot_path_grid[:, 1], 'r-', linewidth=2, label='Robot Path')
+                    plt.plot(path[:, 1], path[:, 0], 'b-', linewidth=2, label='Planned Path')
+                    plt.scatter(start[0], start[1], color='green', s=100, label='Start')
+                    plt.scatter(goal[0], goal[1], color='purple', s=100, label='Goal')
+                    plt.title("Path Planning Result")
+                    plt.legend()
+                    plt.savefig("planned_path.png", dpi=300)
+                    plt.show()
+                else:
+                    print("Could not find a path between start and goal points")
+        else:
+            print("No point cloud data generated from mapping data.")
+    else:
+        print("Not enough mapping data for point cloud generation.")
+
+    # --- A* Path Planning on Merged Grid ---
+    if len(player.path) == 0:
+        print("No path data recorded.")
+    else:
+        path_arr = np.array(player.path)  # shape (N,4): [time, X, Y, theta]
+        min_x, max_x = path_arr[:,1].min(), path_arr[:,1].max()
+        min_y, max_y = path_arr[:,2].min(), path_arr[:,2].max()
+        margin = 5.0
+        origin_dynamic = (min_x - margin, min_y - margin)
+        map_w = (max_x - min_x) + 2 * margin
+        map_h = (max_y - min_y) + 2 * margin
+        grid_w = int(map_w / OCC_RESOLUTION)
+        grid_h = int(map_h / OCC_RESOLUTION)
+        occ_map_fine = np.full((grid_h, grid_w), UNKNOWN_VAL, dtype=int)
+        for (_, X, Y, theta) in path_arr:
+            i, j = dynamic_world_to_map(X, Y, origin_dynamic, OCC_RESOLUTION)
+            if 0 <= i < grid_h and 0 <= j < grid_w:
+                occ_map_fine[i,j] = PATH_VAL
+            lx = X - CORRIDOR_OFFSET * math.sin(theta)
+            ly = Y + CORRIDOR_OFFSET * math.cos(theta)
+            iL, jL = dynamic_world_to_map(lx, ly, origin_dynamic, OCC_RESOLUTION)
+            if 0 <= iL < grid_h and 0 <= jL < grid_w:
+                occ_map_fine[iL,jL] = WALL_VAL
+            rx = X + CORRIDOR_OFFSET * math.sin(theta)
+            ry = Y - CORRIDOR_OFFSET * math.cos(theta)
+            iR, jR = dynamic_world_to_map(rx, ry, origin_dynamic, OCC_RESOLUTION)
+            if 0 <= iR < grid_h and 0 <= jR < grid_w:
+                occ_map_fine[iR,jR] = WALL_VAL
+
+        merged_occ = merge_occupancy_grid(occ_map_fine, NEW_RESOLUTION)
+        # For planning, consider only PATH cells as free (white = 255), others as blocked (0)
+        planning_img = np.where(merged_occ == PATH_VAL, 255, 0).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
+        planning_img = cv2.dilate(planning_img, kernel, iterations=1)
+        plt.figure(figsize=(8,8))
+        plt.imshow(planning_img, origin='lower', cmap='gray')
+        plt.title("Merged Occupancy Grid for Planning (White=free)")
+        plt.show()
+
+        free_cells = np.argwhere(planning_img == 255)
+        if len(free_cells) < 2:
+            print("Not enough free cells in merged grid for A* planning.")
+        else:
+            sidx = tuple(random.choice(free_cells))
+            gidx = tuple(random.choice(free_cells))
+            print(f"Random start index: {sidx}, Random goal index: {gidx}")
+            plan = astar_white(planning_img, sidx, gidx)
+            if plan is None:
+                print("A* could not find a path on the merged grid.")
+            else:
+                plan_world = []
+                for (i, j) in plan:
+                    xw = j * NEW_RESOLUTION + origin_dynamic[0] + NEW_RESOLUTION/2.0
+                    yw = i * NEW_RESOLUTION + origin_dynamic[1] + NEW_RESOLUTION/2.0
+                    plan_world.append((xw, yw))
+                plan_world = np.array(plan_world)
+                plt.figure(figsize=(8,8))
+                extent = [origin_dynamic[0], origin_dynamic[0] + merged_occ.shape[1]*NEW_RESOLUTION,
+                          origin_dynamic[1], origin_dynamic[1] + merged_occ.shape[0]*NEW_RESOLUTION]
+                plt.imshow(planning_img, origin='lower', cmap='gray', extent=extent)
+                plt.plot(plan_world[:,0], plan_world[:,1], 'b.-', label="A* Path")
+                plt.title("Merged Occupancy Grid with A* Path")
+                plt.legend()
+                plt.show()
+
+    # --- Display Path and State vs. Time ---
+    if len(player.path) > 0:
+        path_arr = np.array(player.path)
+        plt.figure(figsize=(10,8))
+        plt.plot(path_arr[:,1], path_arr[:,2], '-o', markersize=3, label='Path')
+        plt.xlabel('X (m)')
+        plt.ylabel('Y (m)')
+        plt.title('2D Path Followed')
+        plt.axis('equal')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+        fig, ax1 = plt.subplots(figsize=(10,4))
+        ax1.plot(path_arr[:,0], path_arr[:,1], '-o', markersize=3, label='X')
+        ax1.plot(path_arr[:,0], path_arr[:,2], '-o', markersize=3, label='Y')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Position (m)')
+        ax1.set_title('Position vs. Time')
+        ax1.legend()
+        ax1.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        plt.figure(figsize=(10,4))
+        plt.plot(path_arr[:,0], np.degrees(path_arr[:,3]), '-o', markersize=3, color='red')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Orientation (°)')
+        plt.title('Orientation vs. Time')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("No path data recorded.")
