@@ -1,115 +1,171 @@
 from vis_nav_game import Player, Action
-import math, time, random
+import math
+import time
 import numpy as np
 import cv2
 import pygame
 import matplotlib.pyplot as plt
 from skimage.metrics import structural_similarity as compare_ssim
+from tqdm import tqdm
+import random
+import open3d as o3d
+import concurrent.futures
 
 # -------------------------------------------------------------------------
-# Configuration
+# Configuration Constants
 # -------------------------------------------------------------------------
-OCC_RESOLUTION = 0.1       # Fine occupancy grid resolution
-CORRIDOR_OFFSET = 1.5      # Lateral offset from robot center to mark walls
-MIN_BASELINE = 1e-3        # Not used in this example
+SCALE = 8
+OFFSET = int(3 / (SCALE / 8))  # <-- Make sure OFFSET is defined
+MIN_BASELINE = 1e-3  # Minimum baseline (in meters)
 
-PATH_VAL    = 1
-WALL_VAL    = 0
+# Occupancy grid parameters (meters per cell)
+OCC_RESOLUTION = 0.1
+
+# Parameters for simple occupancy update (in meters)
+CORRIDOR_OFFSET = 1.5  # Lateral offset from robot center for walls
+
+# Occupancy codes (internal representation)
+PATH_VAL = 1
+WALL_VAL = 0
 UNKNOWN_VAL = -1
 
-NEW_RESOLUTION = 0.3       # Coarser resolution for merging
-SAVE_FILENAME  = "my_occupancy_map.npy"  # Output .npy file
+NEW_RESOLUTION = 0.3  # Coarser resolution for merging occupancy
+SAVE_FILENAME = "my_occupancy_map.npy"  # Output .npy file
 
 # BGR color map for blocky images
 COLOR_MAP = {
     UNKNOWN_VAL: np.array([255, 255, 255], dtype=np.uint8),  # white
-    WALL_VAL:    np.array([0, 0, 255],   dtype=np.uint8),    # red
-    PATH_VAL:    np.array([0, 255, 255], dtype=np.uint8)     # yellow
+    WALL_VAL: np.array([0, 0, 255], dtype=np.uint8),           # red
+    PATH_VAL: np.array([0, 255, 255], dtype=np.uint8)          # yellow
 }
 
 # -------------------------------------------------------------------------
-# Helper Functions
+# Helper Functions for Mapping & Point Cloud Generation
 # -------------------------------------------------------------------------
 def normalize_angle(a):
-    return a % (2*math.pi)
+    return a % (2 * math.pi)
 
-def angle_diff(a,b):
-    return (a - b + math.pi) % (2*math.pi) - math.pi
+def angle_diff(a, b):
+    return (a - b + math.pi) % (2 * math.pi) - math.pi
 
 def images_are_similar(img1, img2, threshold=0.98):
     gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
     gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
     score, _ = compare_ssim(gray1, gray2, full=True)
-    return (score >= threshold)
+    return score >= threshold
 
 def estimate_rotation_phase_correlation(img1, img2):
     gray1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY).astype(np.float32)
     gray2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    center = (gray1.shape[1]//2, gray1.shape[0]//2)
+    center = (gray1.shape[1] // 2, gray1.shape[0] // 2)
     M = 40
     lp1 = cv2.logPolar(gray1, center, M, cv2.INTER_LINEAR + cv2.WARP_FILL_OUTLIERS)
     lp2 = cv2.logPolar(gray2, center, M, cv2.INTER_LINEAR + cv2.WARP_FILL_OUTLIERS)
     (shift, _) = cv2.phaseCorrelate(lp1, lp2)
-    dtheta_deg = (shift[1]/lp1.shape[0])*360.0
+    dtheta_deg = (shift[1] / lp1.shape[0]) * 360.0
     return math.radians(dtheta_deg)
 
-def dynamic_world_to_map(xw, yw, origin, resolution):
-    i = int((yw - origin[1]) / resolution)
-    j = int((xw - origin[0]) / resolution)
+def dynamic_world_to_map(x_world, y_world, origin, resolution):
+    i = int((y_world - origin[1]) / resolution)
+    j = int((x_world - origin[0]) / resolution)
     return (i, j)
 
 def occupancy_to_rgb(occ):
-    """Convert occupancy grid (-1,0,1) to a color image (white,red,yellow)."""
     H, W = occ.shape
-    rgb = np.zeros((H,W,3), dtype=np.uint8)
-    rgb[occ == UNKNOWN_VAL] = [255,255,255]  # white
-    rgb[occ == WALL_VAL]    = [255,0,0]      # red
-    rgb[occ == PATH_VAL]    = [255,255,0]    # yellow
+    rgb = np.zeros((H, W, 3), dtype=np.uint8)
+    rgb[occ == UNKNOWN_VAL] = [255, 255, 255]  # white
+    rgb[occ == WALL_VAL] = [255, 0, 0]           # red
+    rgb[occ == PATH_VAL] = [255, 255, 0]         # yellow
     return rgb
 
 def convert_occ_to_blocky_image(occ, cell_size=10):
-    """Upsample each cell to cell_size x cell_size for a blocky look."""
     H, W = occ.shape
-    img = np.zeros((H,W,3), dtype=np.uint8)
+    img = np.zeros((H, W, 3), dtype=np.uint8)
     for key, color in COLOR_MAP.items():
-        img[occ==key] = color
+        img[occ == key] = color
     return np.kron(img, np.ones((cell_size, cell_size, 1), dtype=np.uint8))
 
 def merge_occupancy_grid(occ, new_res):
-    """Merge fine grid into a coarser grid at resolution new_res."""
     block_size = int(new_res / OCC_RESOLUTION)
     H, W = occ.shape
-    nH   = H // block_size
-    nW   = W // block_size
-    merged = np.full((nH,nW), UNKNOWN_VAL, dtype=int)
+    nH = H // block_size
+    nW = W // block_size
+    merged = np.full((nH, nW), UNKNOWN_VAL, dtype=int)
     for i in range(nH):
         for j in range(nW):
             block = occ[i*block_size:(i+1)*block_size, j*block_size:(j+1)*block_size]
             cpath = np.count_nonzero(block == PATH_VAL)
             cwall = np.count_nonzero(block == WALL_VAL)
             if cpath > cwall and cpath > 0:
-                merged[i,j] = PATH_VAL
+                merged[i, j] = PATH_VAL
             elif cwall > 0:
-                merged[i,j] = WALL_VAL
+                merged[i, j] = WALL_VAL
             else:
-                merged[i,j] = UNKNOWN_VAL
+                merged[i, j] = UNKNOWN_VAL
     return merged
 
-def dilate_path_cells(occ, kernel_size=3):
-    """
-    Morphological dilation on path cells only. 
-    If the dilation turns some UNKNOWN cells into PATH, walls remain walls.
-    """
-    mask = np.where(occ==PATH_VAL, 255, 0).astype(np.uint8)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size,kernel_size))
-    dilated = cv2.dilate(mask, kernel, iterations=1)
-    # Re-inject: newly PATH only where original was UNKNOWN
+def dilate_path_cells(occ, kernel_size=7, iterations=2):
+    mask = np.where(occ == PATH_VAL, 255, 0).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+    dilated = cv2.dilate(mask, kernel, iterations=iterations)
     out = occ.copy()
-    newly_path = (dilated==255) & (out==UNKNOWN_VAL)
+    newly_path = (dilated == 255) & (out == UNKNOWN_VAL)
     out[newly_path] = PATH_VAL
     return out
 
-# -------------- The Player --------------
+# --- Point Cloud Generation Functions ---
+def get_disparity_map(left_img_arr, right_img_arr, edge_offset):
+    gray_left = cv2.cvtColor(left_img_arr, cv2.COLOR_BGR2GRAY)
+    gray_right = cv2.cvtColor(right_img_arr, cv2.COLOR_BGR2GRAY)
+    stereo = cv2.StereoBM_create(numDisparities=16*6, blockSize=15)
+    disparity = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
+    disparity = disparity[edge_offset:-edge_offset, edge_offset:-edge_offset]
+    return disparity
+
+def get_distance_map(disparity_map, baseline, K):
+    focal = K[0,0]
+    H, W = disparity_map.shape
+    distance_map = np.zeros((H, W), dtype=np.float32)
+    for i in range(H):
+        for j in range(W):
+            d = disparity_map[i, j]
+            if d == 0:
+                distance_map[i, j] = 0
+            else:
+                distance_map[i, j] = (focal * baseline) / d
+    distances = np.zeros((H, W, 3), dtype=np.float32)
+    cx = K[0,2]
+    cy = K[1,2]
+    for i in range(H):
+        for j in range(W):
+            Z = distance_map[i, j]
+            X = (j - cx) * Z / focal
+            Y = (i - cy) * Z / focal
+            distances[i, j] = [X, Y, Z]
+    return distances
+
+def get_points(distance_map, image_arr):
+    points = []
+    H, W, _ = distance_map.shape
+    for i in range(OFFSET, H - OFFSET):
+        for j in range(OFFSET, W - OFFSET):
+            X, Y, Z = distance_map[i, j]
+            if Z == 0 or math.isnan(X) or math.isnan(Y) or math.isnan(Z):
+                continue
+            points.append([X, Y, Z])
+    return points
+
+def build_stereo_point_cloud(prev_img, curr_img, baseline, K):
+    left_img_arr = prev_img.copy()
+    right_img_arr = curr_img.copy()
+    disparity = get_disparity_map(left_img_arr, right_img_arr, OFFSET)
+    distances = get_distance_map(disparity, baseline, K)
+    pts = get_points(distances, right_img_arr)
+    return pts
+
+# -------------------------------------------------------------------------
+# Main Player Class: EKF + Visual Measurement + Data Logging
+# -------------------------------------------------------------------------
 class KeyboardPlayerPyGame(Player):
     def __init__(self):
         super().__init__()
@@ -118,30 +174,30 @@ class KeyboardPlayerPyGame(Player):
         self.u = np.array([[0.0],[0.0]])
         self.dt = 1.0
         self.prev_fpv = None
-        self.prev_x   = None
+        self.prev_x = None
         self.K = None
-        self.mapping_data = []
-        self.path = []
+        self.mapping_data = []  # List of (timestamp, state, FPV image)
+        self.path = []          # List of (timestamp, X, Y, theta)
         self.fpv = None
         self.last_act = Action.IDLE
         self.screen = None
         self.keymap = None
         self.last_time = time.time()
-        self.start_time= time.time()
+        self.start_time = time.time()
         pygame.init()
 
     def reset(self):
         self.fpv = None
         self.last_act = Action.IDLE
-        self.screen   = None
+        self.screen = None
         self.x = np.array([[0.0],[0.0],[0.0]])
         self.P = np.eye(3)*0.01
         self.u = np.array([[0.0],[0.0]])
         self.prev_fpv = None
-        self.prev_x   = None
+        self.prev_x = None
         self.mapping_data = []
-        self.path       = []
-        self.start_time= time.time()
+        self.path = []
+        self.start_time = time.time()
         self.last_time = time.time()
         self.keymap = {
             pygame.K_LEFT: Action.LEFT,
@@ -167,30 +223,30 @@ class KeyboardPlayerPyGame(Player):
         now = time.time()
         self.dt = now - self.last_time
         self.last_time = now
-        dx  = self.dt * self.u[0,0]
+        dx = self.dt * self.u[0,0]
         dth = self.dt * self.u[1,0]
         X, Y, th = self.x.flatten()
-        Xp = X + dx*math.cos(th)
-        Yp = Y + dx*math.sin(th)
-        thp= normalize_angle(th + dth)
+        Xp = X + dx * math.cos(th)
+        Yp = Y + dx * math.sin(th)
+        thp = normalize_angle(th + dth)
         self.x = np.array([[Xp],[Yp],[thp]])
         F = np.array([
             [1, 0, -dx*math.sin(th)],
             [0, 1,  dx*math.cos(th)],
             [0, 0, 1]
         ])
-        Q = np.diag([0.01,0.01,math.radians(1)**2])
+        Q = np.diag([0.01, 0.01, math.radians(1)**2])
         self.P = F @ self.P @ F.T + Q
 
     def ekf_update(self, z):
-        H = np.array([[0,0,1]])
+        H = np.array([[0, 0, 1]])
         R = np.array([[math.radians(2)**2]])
         y = np.array([[normalize_angle(z - self.x[2,0])]])
         S = H @ self.P @ H.T + R
         K_gain = self.P @ H.T @ np.linalg.inv(S)
         self.x = self.x + K_gain @ y
         self.x[2,0] = normalize_angle(self.x[2,0])
-        self.P = (np.eye(3)-K_gain@H) @ self.P
+        self.P = (np.eye(3) - K_gain @ H) @ self.P
 
     def act(self):
         for event in pygame.event.get():
@@ -212,84 +268,133 @@ class KeyboardPlayerPyGame(Player):
         u1 = 0.0
         u2 = 0.0
         if self.last_act & Action.FORWARD:
-            u1 = speed/self.dt
+            u1 = speed / self.dt
         if self.last_act & Action.BACKWARD:
-            u1 = -speed/self.dt
+            u1 = -speed / self.dt
         if self.last_act & Action.RIGHT:
-            u2 = -rot_speed/self.dt
+            u2 = -rot_speed / self.dt
         if self.last_act & Action.LEFT:
-            u2 =  rot_speed/self.dt
+            u2 = rot_speed / self.dt
         self.u = np.array([[u1],[u2]])
         self.ekf_predict()
         return self.last_act
 
     def see(self, fpv):
-        if fpv is None or fpv.ndim<3:
+        if fpv is None or fpv.ndim < 3:
             return
         self.fpv = fpv
         if self.screen is None:
-            h,w,_=fpv.shape
-            self.screen = pygame.display.set_mode((w,h))
+            h, w, _ = fpv.shape
+            self.screen = pygame.display.set_mode((w, h))
         img_rgb = cv2.cvtColor(fpv, cv2.COLOR_BGR2RGB)
-        surf    = pygame.surfarray.make_surface(np.flipud(np.rot90(img_rgb)))
-        self.screen.blit(surf,(0,0))
-        font=pygame.font.SysFont(None,24)
-        pos_text=font.render(f'Pos=({self.x[0,0]:.2f},{self.x[1,0]:.2f})',True,(0,0,255))
-        ang_text=font.render(f'Angle={math.degrees(self.x[2,0]):.1f}°',True,(0,0,255))
-        self.screen.blit(pos_text,(10,10))
-        self.screen.blit(ang_text,(10,30))
+        surf = pygame.surfarray.make_surface(np.flipud(np.rot90(img_rgb)))
+        self.screen.blit(surf, (0, 0))
+        font = pygame.font.SysFont(None, 24)
+        pos_text = font.render(f'Pos:({self.x[0,0]:.2f},{self.x[1,0]:.2f})', True, (0, 0, 255))
+        ang_text = font.render(f'Angle:{round(math.degrees(self.x[2,0]),1)}°', True, (0, 0, 255))
+        self.screen.blit(pos_text, (10, 10))
+        self.screen.blit(ang_text, (10, 30))
         pygame.display.update()
 
-        # always store
-        t_stamp=time.time()-self.start_time
-        self.mapping_data.append((t_stamp,self.x.copy(),fpv.copy()))
+        t_stamp = time.time() - self.start_time
+        self.mapping_data.append((t_stamp, self.x.copy(), self.fpv.copy()))
         print(f"Mapping data count: {len(self.mapping_data)}")
-
         if self.prev_fpv is None:
-            self.prev_fpv=fpv.copy()
-            self.prev_x=self.x.copy()
-            print("First image captured.")
+            self.prev_fpv = fpv.copy()
+            self.prev_x = self.x.copy()
+            print("First image captured; state initialized.")
         else:
-            dtheta = estimate_rotation_phase_correlation(self.prev_fpv,fpv)*0.25
-            if dtheta is None or abs(dtheta)<math.radians(1):
+            dtheta = estimate_rotation_phase_correlation(self.prev_fpv, fpv) * 0.25
+            if dtheta is None or abs(dtheta) < math.radians(1):
                 z = self.x[2,0]
             else:
-                z = normalize_angle(self.prev_x[2,0]+dtheta)
-                print(f"Visual measure dtheta={math.degrees(dtheta):.1f}°")
-            if images_are_similar(self.prev_fpv,fpv,threshold=0.99):
+                z = normalize_angle(self.prev_x[2,0] + dtheta)
+                print(f"Visual measure dtheta = {math.degrees(dtheta):.1f}°")
+            if images_are_similar(self.prev_fpv, fpv, threshold=0.99):
                 z = self.x[2,0]
             self.ekf_update(z)
-            self.prev_fpv=fpv.copy()
-            self.prev_x=self.x.copy()
-
-        # only record path if moving forward/backward
+            self.prev_x = self.x.copy()
+            self.prev_fpv = fpv.copy()
+            print(f"Current state: {self.x.flatten()}")
         if (self.last_act & Action.FORWARD) or (self.last_act & Action.BACKWARD):
-            self.path.append((t_stamp,self.x[0,0],self.x[1,0],self.x[2,0]))
+            self.path.append((t_stamp, self.x[0,0], self.x[1,0], self.x[2,0]))
 
     def show_target_images(self):
         tg = self.get_target_images()
-        if tg is None or len(tg)<=0:
+        if tg is None or len(tg) <= 0:
             return
-        hor1=cv2.hconcat(tg[:2])
-        hor2=cv2.hconcat(tg[2:])
-        cimg=cv2.vconcat([hor1,hor2])
-        cv2.imshow("KeyboardPlayer:target_images",cimg)
+        hor1 = cv2.hconcat(tg[:2])
+        hor2 = cv2.hconcat(tg[2:])
+        cimg = cv2.vconcat([hor1, hor2])
+        cv2.imshow("KeyboardPlayer:target_images", cimg)
         cv2.waitKey(1)
 
-    def set_target_images(self,images):
+    def set_target_images(self, images):
         super().set_target_images(images)
         self.show_target_images()
 
-    def compute_transformation(self,prev_state,curr_state):
-        dtheta=angle_diff(curr_state[2],prev_state[2])
-        R=np.array([[math.cos(dtheta),-math.sin(dtheta)],
-                    [math.sin(dtheta), math.cos(dtheta)]])
-        t=np.array([[curr_state[0]-prev_state[0]],
-                    [curr_state[1]-prev_state[1]]])
-        T=np.eye(3)
-        T[0:2,0:2]=R
-        T[0:2,2:3]=t
+    def compute_transformation(self, prev_state, curr_state):
+        dtheta = angle_diff(curr_state[2], prev_state[2])
+        R = np.array([[math.cos(dtheta), -math.sin(dtheta)],
+                      [math.sin(dtheta),  math.cos(dtheta)]])
+        t = np.array([[curr_state[0] - prev_state[0]],
+                      [curr_state[1] - prev_state[1]]])
+        T = np.eye(3)
+        T[0:2, 0:2] = R
+        T[0:2, 2:3] = t
         return T
+
+# -------------------------------------------------------------------------
+# Point Cloud Generation Functions
+# -------------------------------------------------------------------------
+def get_disparity_map(left_img_arr, right_img_arr, edge_offset):
+    gray_left = cv2.cvtColor(left_img_arr, cv2.COLOR_BGR2GRAY)
+    gray_right = cv2.cvtColor(right_img_arr, cv2.COLOR_BGR2GRAY)
+    stereo = cv2.StereoBM_create(numDisparities=16*6, blockSize=15)
+    disparity = stereo.compute(gray_left, gray_right).astype(np.float32) / 16.0
+    disparity = disparity[edge_offset:-edge_offset, edge_offset:-edge_offset]
+    return disparity
+
+def get_distance_map(disparity_map, baseline, K):
+    focal = K[0,0]
+    H, W = disparity_map.shape
+    distance_map = np.zeros((H, W), dtype=np.float32)
+    for i in range(H):
+        for j in range(W):
+            d = disparity_map[i, j]
+            if d == 0:
+                distance_map[i, j] = 0
+            else:
+                distance_map[i, j] = (focal * baseline) / d
+    distances = np.zeros((H, W, 3), dtype=np.float32)
+    cx = K[0,2]
+    cy = K[1,2]
+    for i in range(H):
+        for j in range(W):
+            Z = distance_map[i, j]
+            X = (j - cx) * Z / focal
+            Y = (i - cy) * Z / focal
+            distances[i, j] = [X, Y, Z]
+    return distances
+
+def get_points(distance_map, image_arr):
+    points = []
+    H, W, _ = distance_map.shape
+    for i in range(OFFSET, H - OFFSET):
+        for j in range(OFFSET, W - OFFSET):
+            X, Y, Z = distance_map[i, j]
+            if Z == 0 or math.isnan(X) or math.isnan(Y) or math.isnan(Z):
+                continue
+            points.append([X, Y, Z])
+    return points
+
+def build_stereo_point_cloud(prev_img, curr_img, baseline, K):
+    left_img_arr = prev_img.copy()
+    right_img_arr = curr_img.copy()
+    disparity = get_disparity_map(left_img_arr, right_img_arr, OFFSET)
+    distances = get_distance_map(disparity, baseline, K)
+    pts = get_points(distances, right_img_arr)
+    return pts
 
 # -------------------------------------------------------------------------
 # MAIN
@@ -301,60 +406,180 @@ if __name__=="__main__":
 
     print(f"Total mapping data entries: {len(player.mapping_data)}")
 
-    if len(player.path)==0:
-        print("No path data recorded. Possibly turned in place only.")
+    # --- Build Occupancy Map from Recorded Path ---
+    if len(player.path) == 0:
+        print("No path data recorded (only turning?).")
     else:
-        # 1) Build Fine Occupancy
-        path = np.array(player.path)  # shape (N,4): [t, X, Y, theta]
+        path = np.array(player.path)  # shape (N,4): [time, X, Y, theta]
         min_x, max_x = path[:,1].min(), path[:,1].max()
         min_y, max_y = path[:,2].min(), path[:,2].max()
         margin = 5.0
         origin = (min_x - margin, min_y - margin)
-        map_w  = (max_x - min_x) + 2*margin
-        map_h  = (max_y - min_y) + 2*margin
-        grid_w = int(map_w/OCC_RESOLUTION)
-        grid_h = int(map_h/OCC_RESOLUTION)
-        occ_map = np.full((grid_h,grid_w), UNKNOWN_VAL, dtype=int)
-
-        # Mark path & walls
+        map_w = (max_x - min_x) + 2 * margin
+        map_h = (max_y - min_y) + 2 * margin
+        grid_w = int(map_w / OCC_RESOLUTION)
+        grid_h = int(map_h / OCC_RESOLUTION)
+        
+        occ_map = np.full((grid_h, grid_w), UNKNOWN_VAL, dtype=int)
         for (_, X, Y, theta) in path:
-            i,j = dynamic_world_to_map(X, Y, origin, OCC_RESOLUTION)
-            if 0<=i<grid_h and 0<=j<grid_w:
-                occ_map[i,j] = PATH_VAL
-            # left
-            lx=X - CORRIDOR_OFFSET*math.sin(theta)
-            ly=Y + CORRIDOR_OFFSET*math.cos(theta)
-            iL,jL = dynamic_world_to_map(lx,ly,origin,OCC_RESOLUTION)
-            if 0<=iL<grid_h and 0<=jL<grid_w:
-                occ_map[iL,jL] = WALL_VAL
-            # right
-            rx=X + CORRIDOR_OFFSET*math.sin(theta)
-            ry=Y - CORRIDOR_OFFSET*math.cos(theta)
-            iR,jR = dynamic_world_to_map(rx,ry,origin,OCC_RESOLUTION)
-            if 0<=iR<grid_h and 0<=jR<grid_w:
-                occ_map[iR,jR] = WALL_VAL
-
-        # 2) (Optional) Show the fine occupancy
+            i, j = dynamic_world_to_map(X, Y, origin, OCC_RESOLUTION)
+            if 0 <= i < grid_h and 0 <= j < grid_w:
+                occ_map[i, j] = PATH_VAL
+            # left offset
+            lx = X - CORRIDOR_OFFSET * math.sin(theta)
+            ly = Y + CORRIDOR_OFFSET * math.cos(theta)
+            iL, jL = dynamic_world_to_map(lx, ly, origin, OCC_RESOLUTION)
+            if 0 <= iL < grid_h and 0 <= jL < grid_w:
+                occ_map[iL, jL] = WALL_VAL
+            # right offset
+            rx = X + CORRIDOR_OFFSET * math.sin(theta)
+            ry = Y - CORRIDOR_OFFSET * math.cos(theta)
+            iR, jR = dynamic_world_to_map(rx, ry, origin, OCC_RESOLUTION)
+            if 0 <= iR < grid_h and 0 <= jR < grid_w:
+                occ_map[iR, jR] = WALL_VAL
+        
+        # Display fine occupancy grid
         fine_rgb = occupancy_to_rgb(occ_map)
-        plt.figure()
+        plt.figure(figsize=(10,10))
         plt.imshow(fine_rgb, origin='lower')
         plt.title("Fine Occupancy Grid")
         plt.show()
 
-        # 3) Merge to Coarser Grid
+        # Merge to coarser grid and dilate path cells
         merged_occ = merge_occupancy_grid(occ_map, NEW_RESOLUTION)
-
-        # 4) Dilate path cells to widen corridor
-        merged_dil = dilate_path_cells(merged_occ, kernel_size=3)
-
-        # 5) Save final occupancy (with -1 unknown, 0 walls, 1 path) to npy
+        merged_dil = dilate_path_cells(merged_occ, kernel_size=7)
         np.save(SAVE_FILENAME, merged_dil)
         print(f"Saved occupancy map to {SAVE_FILENAME} with shape={merged_dil.shape}.")
-
-        # 6) For quick display
         blocky = convert_occ_to_blocky_image(merged_dil, cell_size=20)
-        plt.figure()
+        plt.figure(figsize=(10,10))
         plt.imshow(cv2.cvtColor(blocky, cv2.COLOR_BGR2RGB))
         plt.title("Merged + Dilated Occupancy (Blocky View)")
         plt.axis('off')
         plt.show()
+
+    # --- Point Cloud Generation and Visualization ---
+    if len(player.mapping_data) > 1:
+        all_points = []
+        print("Building point cloud from mapping data...")
+        for i in range(1, len(player.mapping_data)):
+            t_prev, state_prev, img_prev = player.mapping_data[i-1]
+            t_curr, state_curr, img_curr = player.mapping_data[i]
+            baseline = np.linalg.norm(state_curr[:2] - state_prev[:2])
+            if baseline < MIN_BASELINE:
+                continue
+            pts = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
+            if pts is not None:
+                all_points.extend(pts)
+        print(f"Total points generated: {len(all_points)}")
+        if len(all_points) > 0:
+            all_points = np.array(all_points)
+            # Project all points onto the x-y plane (set z=0)
+            all_points[:,2] = 0
+            pc = o3d.geometry.PointCloud()
+            pc.points = o3d.utility.Vector3dVector(all_points)
+            print("Displaying point cloud in Open3D.")
+            o3d.visualization.draw_geometries([pc])
+        else:
+            print("No point cloud data generated from mapping data.")
+    else:
+        print("Not enough mapping data for point cloud generation.")
+
+    # --- A* Path Planning on Merged Grid ---
+    if len(player.path) == 0:
+        print("No path data recorded.")
+    else:
+        path_arr = np.array(player.path)  # shape (N,4): [time, X, Y, theta]
+        min_x, max_x = path_arr[:,1].min(), path_arr[:,1].max()
+        min_y, max_y = path_arr[:,2].min(), path_arr[:,2].max()
+        margin = 5.0
+        origin_dynamic = (min_x - margin, min_y - margin)
+        map_w = (max_x - min_x) + 2 * margin
+        map_h = (max_y - min_y) + 2 * margin
+        grid_w = int(map_w / OCC_RESOLUTION)
+        grid_h = int(map_h / OCC_RESOLUTION)
+        occ_map_fine = np.full((grid_h, grid_w), UNKNOWN_VAL, dtype=int)
+        for (_, X, Y, theta) in path_arr:
+            i, j = dynamic_world_to_map(X, Y, origin_dynamic, OCC_RESOLUTION)
+            if 0 <= i < grid_h and 0 <= j < grid_w:
+                occ_map_fine[i,j] = PATH_VAL
+            lx = X - CORRIDOR_OFFSET * math.sin(theta)
+            ly = Y + CORRIDOR_OFFSET * math.cos(theta)
+            iL, jL = dynamic_world_to_map(lx, ly, origin_dynamic, OCC_RESOLUTION)
+            if 0 <= iL < grid_h and 0 <= jL < grid_w:
+                occ_map_fine[iL,jL] = WALL_VAL
+            rx = X + CORRIDOR_OFFSET * math.sin(theta)
+            ry = Y - CORRIDOR_OFFSET * math.cos(theta)
+            iR, jR = dynamic_world_to_map(rx, ry, origin_dynamic, OCC_RESOLUTION)
+            if 0 <= iR < grid_h and 0 <= jR < grid_w:
+                occ_map_fine[iR,jR] = WALL_VAL
+
+        merged_occ = merge_occupancy_grid(occ_map_fine, NEW_RESOLUTION)
+        # For planning, consider only PATH cells as free (white = 255), others as blocked (0)
+        planning_img = np.where(merged_occ == PATH_VAL, 255, 0).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5,5))
+        planning_img = cv2.dilate(planning_img, kernel, iterations=1)
+        plt.figure(figsize=(8,8))
+        plt.imshow(planning_img, origin='lower', cmap='gray')
+        plt.title("Merged Occupancy Grid for Planning (White=free)")
+        plt.show()
+
+        free_cells = np.argwhere(planning_img == 255)
+        if len(free_cells) < 2:
+            print("Not enough free cells in merged grid for A* planning.")
+        else:
+            sidx = tuple(random.choice(free_cells))
+            gidx = tuple(random.choice(free_cells))
+            print(f"Random start index: {sidx}, Random goal index: {gidx}")
+            plan = astar_white(planning_img, sidx, gidx)
+            if plan is None:
+                print("A* could not find a path on the merged grid.")
+            else:
+                plan_world = []
+                for (i, j) in plan:
+                    xw = j * NEW_RESOLUTION + origin_dynamic[0] + NEW_RESOLUTION/2.0
+                    yw = i * NEW_RESOLUTION + origin_dynamic[1] + NEW_RESOLUTION/2.0
+                    plan_world.append((xw, yw))
+                plan_world = np.array(plan_world)
+                plt.figure(figsize=(8,8))
+                extent = [origin_dynamic[0], origin_dynamic[0] + merged_occ.shape[1]*NEW_RESOLUTION,
+                          origin_dynamic[1], origin_dynamic[1] + merged_occ.shape[0]*NEW_RESOLUTION]
+                plt.imshow(planning_img, origin='lower', cmap='gray', extent=extent)
+                plt.plot(plan_world[:,0], plan_world[:,1], 'b.-', label="A* Path")
+                plt.title("Merged Occupancy Grid with A* Path")
+                plt.legend()
+                plt.show()
+
+    # --- Display Path and State vs. Time ---
+    if len(player.path) > 0:
+        path_arr = np.array(player.path)
+        plt.figure(figsize=(10,8))
+        plt.plot(path_arr[:,1], path_arr[:,2], '-o', markersize=3, label='Path')
+        plt.xlabel('X (m)')
+        plt.ylabel('Y (m)')
+        plt.title('2D Path Followed')
+        plt.axis('equal')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+        fig, ax1 = plt.subplots(figsize=(10,4))
+        ax1.plot(path_arr[:,0], path_arr[:,1], '-o', markersize=3, label='X')
+        ax1.plot(path_arr[:,0], path_arr[:,2], '-o', markersize=3, label='Y')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Position (m)')
+        ax1.set_title('Position vs. Time')
+        ax1.legend()
+        ax1.grid(True)
+        plt.tight_layout()
+        plt.show()
+
+        plt.figure(figsize=(10,4))
+        plt.plot(path_arr[:,0], np.degrees(path_arr[:,3]), '-o', markersize=3, color='red')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Orientation (°)')
+        plt.title('Orientation vs. Time')
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("No path data recorded.")
