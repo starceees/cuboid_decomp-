@@ -312,7 +312,7 @@ class PathVisualizer(Node):
 
 def main(args=None):
     # Load the raw point cloud from file to build the occupancy grid.
-    point_cloud_file = "point_cloud.npy"  # Update with your saved point cloud path
+    point_cloud_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy"  # Update with your saved point cloud path
     try:
         points = np.load(point_cloud_file)
         print(f"Loaded point cloud from {point_cloud_file} with shape {points.shape}")
