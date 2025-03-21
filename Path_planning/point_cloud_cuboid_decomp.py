@@ -9,15 +9,14 @@ from visualization_msgs.msg import Marker, MarkerArray
 import sensor_msgs_py.point_cloud2 as pc2
 import random
 
+# Additional imports for graph + plotting
+import networkx as nx
+import matplotlib.pyplot as plt
+
 #############################################
 # 1. Obstacle Expansion (3D Safety Margin)
 #############################################
 def expand_obstacles_3d(occupancy, safety_voxels=2):
-    """
-    Expands obstacles in a 3D occupancy grid by 'safety_voxels' using morphological dilation.
-    occupancy: 3D numpy array (1=obstacle, 0=free)
-    Returns a new 3D array with obstacles expanded.
-    """
     from scipy.ndimage import generate_binary_structure, binary_dilation
     structure = generate_binary_structure(rank=3, connectivity=1)  # 6-connected 3D structure
     expanded = binary_dilation(occupancy.astype(bool), structure=structure, iterations=safety_voxels)
@@ -27,11 +26,6 @@ def expand_obstacles_3d(occupancy, safety_voxels=2):
 # 2. Build 3D Occupancy Grid from Point Cloud
 #############################################
 def build_occupancy_grid(points, global_min, resolution):
-    """
-    Given a Nx3 point cloud and a resolution (meters per voxel), build a 3D occupancy grid.
-    Occupied voxels are marked as 1, free voxels as 0.
-    global_min: minimum bound of the point cloud (3-vector)
-    """
     extent = np.max(points, axis=0) - global_min
     nx = int(np.ceil(extent[0] / resolution))
     ny = int(np.ceil(extent[1] / resolution))
@@ -46,11 +40,13 @@ def build_occupancy_grid(points, global_min, resolution):
 
 #############################################
 # 3. Greedy 3D Region Growing for Free Cuboids
+#    with a fixed max_z_thickness
 #############################################
-def region_growing_3d(occupancy):
+def region_growing_3d(occupancy, max_z_thickness=5):
     """
-    Greedily grows maximal free cuboids from unvisited free voxels.
-    occupancy: 3D numpy array with 1=obstacle, 0=free.
+    Greedily grows free cuboids in X/Y, but caps the thickness in Z to 'max_z_thickness'.
+    occupancy: 3D numpy array (1=obstacle, 0=free).
+    max_z_thickness: the maximum allowed size in the z dimension for each cuboid.
     Returns a list of cuboids, each as a dictionary:
       {
          'min_idx': np.array([ix, iy, iz]),
@@ -84,13 +80,13 @@ def region_growing_3d(occupancy):
                             if np.all(candidate == 0):
                                 j_max += 1
                                 changed = True
-                        # Expand in +z
-                        if k_max < nz - 1:
+                        # Expand in +z, but do not exceed max_z_thickness
+                        current_z_thickness = (k_max - k_min + 1)
+                        if current_z_thickness < max_z_thickness and k_max < nz - 1:
                             candidate = occupancy[i_min:i_max+1, j_min:j_max+1, k_max+1]
                             if np.all(candidate == 0):
                                 k_max += 1
                                 changed = True
-                    # Mark all voxels in the region as visited.
                     visited[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1] = True
                     cuboid = {
                         'min_idx': np.array([i_min, j_min, k_min]),
@@ -103,18 +99,6 @@ def region_growing_3d(occupancy):
 # 4. Convert Grid Cuboids to World Coordinates
 #############################################
 def block_to_world_cuboid(block, global_min, resolution):
-    """
-    Given a block (cuboid) with keys:
-      'min_idx': [i, j, k]
-      'dimensions': [dx, dy, dz]
-    Convert to world coordinates:
-      lower = global_min + min_idx * resolution
-      upper = global_min + (min_idx + dimensions) * resolution
-    Returns a dictionary with:
-      'lower': np.array([x, y, z]),
-      'upper': np.array([x, y, z]),
-      'dimensions_world': upper - lower
-    """
     min_idx = block['min_idx']
     dims = block['dimensions']
     lower = global_min + (min_idx * resolution)
@@ -130,10 +114,6 @@ def block_to_world_cuboid(block, global_min, resolution):
 #############################################
 class RVizPublisher(Node):
     def __init__(self, points, cuboids, frame_id="map"):
-        """
-        :param points: Nx3 numpy array (original point cloud)
-        :param cuboids: list of dictionaries with keys 'lower', 'upper', 'dimensions_world'
-        """
         super().__init__('rviz_region_growing_publisher')
         qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.QoSReliabilityPolicy.RELIABLE,
@@ -197,49 +177,105 @@ class RVizPublisher(Node):
         self.marker_pub.publish(marker_array)
 
 #############################################
-# 6. Main Routine
+# 6. Cuboid Connectivity + Graph Plotting
+#############################################
+def cuboids_touch_or_overlap(c1, c2, tol=0.0):
+    """
+    Returns True if cuboid c1 and c2 overlap or touch in all 3 dimensions
+    (within an optional tolerance tol).
+    c1, c2 are dicts with:
+      'lower': np.array([x1, y1, z1])
+      'upper': np.array([x2, y2, z2])
+    """
+    for i in range(3):
+        if c1['upper'][i] < c2['lower'][i] - tol or c2['upper'][i] < c1['lower'][i] - tol:
+            return False
+    return True
+
+def build_cuboid_graph(cuboids, tol=0.0):
+    import networkx as nx
+    G = nx.Graph()
+    # Add nodes
+    for i, cub in enumerate(cuboids):
+        G.add_node(i, cuboid=cub)
+    # Add edges if they overlap/touch
+    for i in range(len(cuboids)):
+        for j in range(i+1, len(cuboids)):
+            if cuboids_touch_or_overlap(cuboids[i], cuboids[j], tol):
+                G.add_edge(i, j)
+    return G
+
+def plot_and_save_cuboid_graph(G, out_file="cuboid_graph.png"):
+    import networkx as nx
+    import matplotlib.pyplot as plt
+    
+    pos = nx.spring_layout(G, seed=42)
+    # Build labels
+    labels = {}
+    for node in G.nodes(data=True):
+        idx = node[0]
+        cub = node[1]['cuboid']
+        lower = cub['lower'].round(1)
+        dims = cub['dimensions_world'].round(1)
+        labels[idx] = f"({tuple(lower)}, {tuple(dims)})"
+    
+    plt.figure(figsize=(8,6))
+    nx.draw(G, pos, with_labels=False, node_color="steelblue", node_size=600, edge_color="black")
+    nx.draw_networkx_labels(G, pos, labels=labels, font_size=8)
+    plt.title("Cuboid Connectivity Graph")
+    plt.axis('equal')
+    
+    # Save to file
+    plt.savefig(out_file, dpi=150)
+    plt.close()
+    print(f"Saved cuboid connectivity graph to {out_file}")
+
+#############################################
+# 7. Main Routine
 #############################################
 def main(args=None):
     rclpy.init(args=args)
     
     # Load point cloud (Nx3 numpy array)
-    # Update the path to your actual point cloud file.
     pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy"
     points = np.load(pc_file)
     if points.dtype.names is not None:
         points = np.vstack([points[name] for name in ('x', 'y', 'z')]).T
     
-    # Compute bounding box of the point cloud
+    # Compute bounding box
     global_min = np.min(points, axis=0)
     global_max = np.max(points, axis=0)
     print("Point Cloud Bounding Box:")
     print("  Min:", global_min)
     print("  Max:", global_max)
     
-    # Set voxel resolution (meters per voxel)
-    resolution = 0.2
-    
     # Build occupancy grid
+    resolution = 0.2
     occupancy = build_occupancy_grid(points, global_min, resolution)
     print(f"Occupancy grid shape: {occupancy.shape}, Occupied voxels: {occupancy.sum()}")
     
-    # Expand obstacles in 3D (for safety margin)
+    # Expand obstacles (safety margin)
     safety_voxels = 2
     occupancy_expanded = expand_obstacles_3d(occupancy, safety_voxels)
     
-    # Perform region growing on the 3D occupancy grid to obtain free cuboids.
-    free_cuboids_blocks = region_growing_3d(occupancy_expanded)
-    print("Number of free cuboids found (in grid indices):", len(free_cuboids_blocks))
+    # =========== NEW: specify a fixed Z thickness for each cuboid =============
+    max_z_thickness = 20  # <-- Adjust this as you see fit
+    # Region growing -> free cuboids, limiting Z dimension to 'max_z_thickness'
+    free_cuboids_blocks = region_growing_3d(occupancy_expanded, max_z_thickness=max_z_thickness)
+    print("Number of free cuboids found:", len(free_cuboids_blocks))
     
-    # Convert each free cuboid from grid indices to world coordinates.
+    # Convert blocks to world coords
     cuboids = []
     for block in free_cuboids_blocks:
+        print("[DEBUG] Block:", block)
         cub = block_to_world_cuboid(block, global_min, resolution)
         cuboids.append(cub)
     
-    print("Publishing point cloud and free cuboids in RViz2...")
+    # Build + save the connectivity graph
+    #G = build_cuboid_graph(cuboids, tol=0.0)
+    #plot_and_save_cuboid_graph(G, out_file="my_cuboid_graph.png")
     
-    # Create and spin the ROS2 publisher node.
+    # Publish to RViz
     node = RVizPublisher(points, cuboids, frame_id="map")
     try:
         rclpy.spin(node)
