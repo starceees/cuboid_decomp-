@@ -36,7 +36,7 @@ def load_cuboids(filename="my_cuboids.pkl"):
 #############################################
 def expand_obstacles_3d(occupancy, safety_voxels=2):
     from scipy.ndimage import generate_binary_structure, binary_dilation
-    structure = generate_binary_structure(rank=3, connectivity=1)
+    structure = generate_binary_structure(rank=3, connectivity=1)  # 6-connected 3D structure
     expanded = binary_dilation(occupancy.astype(bool), structure=structure, iterations=safety_voxels)
     return expanded.astype(np.uint8)
 
@@ -74,16 +74,19 @@ def region_growing_3d(occupancy, max_z_thickness=5):
                     changed = True
                     while changed:
                         changed = False
+                        # Expand in +x
                         if i_max < nx - 1:
                             candidate = occupancy[i_max+1, j_min:j_max+1, k_min:k_max+1]
                             if np.all(candidate == 0):
                                 i_max += 1
                                 changed = True
+                        # Expand in +y
                         if j_max < ny - 1:
                             candidate = occupancy[i_min:i_max+1, j_max+1, k_min:k_max+1]
                             if np.all(candidate == 0):
                                 j_max += 1
                                 changed = True
+                        # Expand in +z, but cap thickness
                         current_z = k_max - k_min + 1
                         if current_z < max_z_thickness and k_max < nz - 1:
                             candidate = occupancy[i_min:i_max+1, j_min:j_max+1, k_max+1]
@@ -213,7 +216,7 @@ def build_cuboid_graph_from_cuboids(cuboids, tol=0.0):
 def build_exploration_path(G, exploration_factor, start_node=None):
     """
     Performs DFS from a start node (or random if None) on graph G.
-    Then, takes the first N nodes (N = exploration_factor * total nodes) from the DFS order.
+    Then takes the first N nodes (N = exploration_factor * total nodes) from the DFS order.
     Returns a list of node indices representing the exploration path.
     """
     if start_node is None:
@@ -224,10 +227,10 @@ def build_exploration_path(G, exploration_factor, start_node=None):
     return exploration_path
 
 #############################################
-# 10. ROS2 Publisher Node for RViz2 Visualization + Path Publishing
+# 10. ROS2 Publisher Node for RViz2 Visualization + Path Publishing + Drone Mesh
 #############################################
 class RVizPublisher(Node):
-    def __init__(self, points, cuboids, path_indices, exploration_path_coords, frame_id="map"):
+    def __init__(self, points, cuboids, path_indices, exploration_path_coords, drone_mesh_resource, frame_id="map"):
         super().__init__('rviz_los_planner')
         qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.QoSReliabilityPolicy.RELIABLE,
@@ -239,10 +242,12 @@ class RVizPublisher(Node):
         self.marker_pub_path = self.create_publisher(MarkerArray, '/path_cuboids', qos)
         self.path_pub = self.create_publisher(Path, '/planned_path', qos)
         self.exploration_path_pub = self.create_publisher(Path, '/exploration_path', qos)
+        # New publisher for the drone mesh marker.
+        self.drone_pub = self.create_publisher(Marker, '/drone_mesh', qos)
         
         self.points = points
         self.cuboids = cuboids
-        self.path_indices = path_indices  # direct path (cuboid indices)
+        self.path_indices = path_indices  # Direct path (cuboid indices)
         self.frame_id = frame_id
         
         self.path_coords = []
@@ -252,6 +257,10 @@ class RVizPublisher(Node):
             self.path_coords.append(center)
         
         self.exploration_path_coords = exploration_path_coords
+        
+        # NEW: Drone mesh resource URI and index for animation.
+        self.drone_mesh_resource = drone_mesh_resource  # e.g. "package://my_package/meshes/quadrotor.dae"
+        self.current_drone_index = 0
         
         self.timer = self.create_timer(1.0, self.publish_all)
         self.get_logger().info("LOS Planner Node initialized.")
@@ -263,7 +272,8 @@ class RVizPublisher(Node):
         self.publish_path_cuboids(now)
         self.publish_path(now)
         self.publish_exploration_path(now)
-        self.get_logger().info("Published point cloud, cuboid markers, and paths.")
+        self.publish_drone_marker(now)
+        self.get_logger().info("Published point cloud, cuboid markers, paths, and drone mesh.")
     
     def publish_point_cloud(self, stamp):
         header = Header()
@@ -363,22 +373,32 @@ class RVizPublisher(Node):
             pose.pose.orientation.w = 1.0
             path_msg.poses.append(pose)
         self.exploration_path_pub.publish(path_msg)
-
-#############################################
-# 10. DFS-based Exploration Path Planning
-#############################################
-def build_exploration_path(G, exploration_factor, start_node=None):
-    """
-    Performs DFS from a start node (or random if None) on graph G.
-    Then takes the first N nodes (N = exploration_factor * total nodes) from the DFS order.
-    Returns a list of node indices representing the exploration path.
-    """
-    if start_node is None:
-        start_node = random.choice(list(G.nodes))
-    dfs_order = list(nx.dfs_preorder_nodes(G, source=start_node))
-    target_count = max(1, int(exploration_factor * len(G.nodes)))
-    exploration_path = dfs_order[:target_count]
-    return exploration_path
+    
+    def publish_drone_marker(self, stamp):
+        # Move the drone along the direct path (cycle through path_coords)
+        if not self.path_coords:
+            return
+        pos = self.path_coords[self.current_drone_index]
+        m = Marker()
+        m.header.frame_id = self.frame_id
+        m.header.stamp = stamp
+        m.ns = "drone"
+        m.id = 0
+        m.type = Marker.MESH_RESOURCE
+        m.action = Marker.ADD
+        m.mesh_resource = self.drone_mesh_resource
+        m.pose.position.x = float(pos[0])
+        m.pose.position.y = float(pos[1])
+        m.pose.position.z = float(pos[2])
+        m.pose.orientation.w = 1.0
+        # Adjust scale as necessary for your drone mesh.
+        m.scale.x = 1.0
+        m.scale.y = 1.0
+        m.scale.z = 1.0
+        m.color.a = 1.0  # fully opaque
+        self.drone_pub.publish(m)
+        # Increment the drone index (cycle through the path)
+        self.current_drone_index = (self.current_drone_index + 1) % len(self.path_coords)
 
 #############################################
 # 11. Main Routine
@@ -429,10 +449,16 @@ def main(args=None):
     
     print(f"Total cuboids loaded: {len(cuboids)}")
     
+    # Filter cuboids to only consider those above a minimum z threshold
+    min_z_threshold = 0.0  # adjust as needed
+    filtered_cuboids = [cub for cub in cuboids if ((cub['lower'][2] + cub['upper'][2]) / 2.0) >= min_z_threshold]
+    print(f"Cuboids after filtering with min_z >= {min_z_threshold}: {len(filtered_cuboids)}")
+    cuboids = filtered_cuboids  # use filtered cuboids for planning
+    
     # Build a graph from cuboids for exploration planning
     G_explore = build_cuboid_graph_from_cuboids(cuboids, tol=0.0)
     
-    # Randomly choose a start for exploration (only one is needed)
+    # For exploration, choose a random start (only one is needed)
     explore_start = random.choice(list(G_explore.nodes))
     exploration_nodes = build_exploration_path(G_explore, exploration_factor=0.7, start_node=explore_start)
     print("Exploration path (node indices):", exploration_nodes)
@@ -443,7 +469,7 @@ def main(args=None):
         center_pt = (cub['lower'] + cub['upper']) / 2.0
         exploration_path_coords.append(center_pt)
     
-    # For direct path planning, pick random start and goal
+    # For direct path planning, choose random start and goal
     start_idx = random.randint(0, len(cuboids)-1)
     goal_idx = random.randint(0, len(cuboids)-1)
     while goal_idx == start_idx:
@@ -463,8 +489,11 @@ def main(args=None):
         center_pt = (cub['lower'] + cub['upper']) / 2.0
         path_coords.append(center_pt)
     
-    # Publish to RViz: publish all cuboids, direct path cuboids, and exploration path
-    node = RVizPublisher(points, cuboids, direct_path, exploration_path_coords, frame_id="map")
+    # Define your drone mesh resource (update the URI as needed)
+    drone_mesh_resource = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
+    
+    # Publish to RViz: publish all cuboids, direct path cuboids, exploration path, and drone mesh.
+    node = RVizPublisher(points, cuboids, direct_path, exploration_path_coords, drone_mesh_resource, frame_id="map")
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
