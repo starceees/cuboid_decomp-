@@ -265,13 +265,14 @@ class RVizPublisher(Node):
         
         self.exploration_path_coords = exploration_path_coords
         
-        self.drone_mesh_resource = drone_mesh_resource  # e.g., "file:///home/your_path/mesh.stl"
-        # For continuous drone movement, we now use segment interpolation:
+        self.drone_mesh_resource = drone_mesh_resource  # e.g., "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
+        # For continuous drone motion, use segment interpolation:
         self.current_segment_index = 0
         self.alpha = 0.0
-        self.alpha_increment = 0.1  # adjust for speed
+        self.alpha_increment = 0.05  # Adjust for smoothness/speed
         
-        self.timer = self.create_timer(0.5, self.publish_all)  # update rate (0.5 sec)
+        # Set timer period to 0.1 sec for smoother updates
+        self.timer = self.create_timer(0.1, self.publish_all)
         self.get_logger().info("LOS Planner Node initialized.")
     
     def publish_all(self):
@@ -349,7 +350,7 @@ class RVizPublisher(Node):
             m.color.r = 0.0
             m.color.g = 0.5
             m.color.b = 0.0
-            m.color.a = 0.8
+            m.color.a = 0.5
             marker_array.markers.append(m)
         self.marker_pub_path.publish(marker_array)
     
@@ -391,25 +392,21 @@ class RVizPublisher(Node):
         self.exploration_path_pub.publish(path_msg)
     
     def publish_drone_marker(self, stamp):
-        # If there is only one point, publish it directly.
         if len(self.path_coords) < 2:
             pos = self.path_coords[0]
         else:
-            # Interpolate along the current segment
-            if self.current_drone_index >= len(self.path_coords) - 1:
-                # If we're at the last point, wrap around or hold the position
-                pos = self.path_coords[-1]
-            else:
-                pt1 = self.path_coords[self.current_drone_index]
-                pt2 = self.path_coords[self.current_drone_index + 1]
-                # Linear interpolation
-                pos = (1 - self.alpha) * np.array(pt1) + self.alpha * np.array(pt2)
-                self.alpha += self.alpha_increment
-                if self.alpha >= 1.0:
-                    self.alpha = 0.0
-                    self.current_drone_index += 1
-                    if self.current_drone_index >= len(self.path_coords) - 1:
-                        self.current_drone_index = 0  # Loop around
+            # Determine current segment and interpolate between waypoints
+            seg = self.current_segment_index
+            next_seg = seg + 1
+            if next_seg >= len(self.path_coords):
+                next_seg = 0  # Loop around if at the end
+            pt1 = np.array(self.path_coords[seg])
+            pt2 = np.array(self.path_coords[next_seg])
+            pos = (1 - self.alpha) * pt1 + self.alpha * pt2
+            self.alpha += self.alpha_increment
+            if self.alpha >= 1.0:
+                self.alpha = 0.0
+                self.current_segment_index = next_seg
                 
         m = Marker()
         m.header.frame_id = self.frame_id
@@ -423,9 +420,9 @@ class RVizPublisher(Node):
         m.pose.position.y = float(pos[1])
         m.pose.position.z = float(pos[2])
         m.pose.orientation.w = 1.0
-        m.scale.x = 3.0
-        m.scale.y = 3.0
-        m.scale.z = 3.0
+        m.scale.x = 5.0
+        m.scale.y = 5.0
+        m.scale.z = 5.0
         m.color.a = 1.0
         self.drone_pub.publish(m)
 
@@ -457,7 +454,7 @@ def main(args=None):
     occupancy = build_occupancy_grid(points, global_min, resolution)
     print(f"Occupancy grid shape: {occupancy.shape}, Occupied voxels: {occupancy.sum()}")
     
-    # Expand obstacles
+    # Expand obstacles (safety margin)
     safety_voxels = 2
     occupancy_expanded = expand_obstacles_3d(occupancy, safety_voxels)
     
@@ -521,11 +518,10 @@ def main(args=None):
     drone_mesh_resource = "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
     
     publisher_node = RVizPublisher(points, cuboids, direct_path, exploration_path_coords, drone_mesh_resource, frame_id="map")
-    # Initialize interpolation parameters for smooth drone movement
     publisher_node.current_drone_index = 0
     publisher_node.current_segment_index = 0
     publisher_node.alpha = 0.0
-    publisher_node.alpha_increment = 0.05  # Adjust for speed
+    publisher_node.alpha_increment = 0.05  # Adjust for smoothness
     
     try:
         rclpy.spin(publisher_node)
