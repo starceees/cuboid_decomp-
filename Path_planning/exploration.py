@@ -36,7 +36,7 @@ def load_cuboids(filename="my_cuboids.pkl"):
 #############################################
 def expand_obstacles_3d(occupancy, safety_voxels=2):
     from scipy.ndimage import generate_binary_structure, binary_dilation
-    structure = generate_binary_structure(rank=3, connectivity=1)  # 6-connected 3D structure
+    structure = generate_binary_structure(rank=3, connectivity=1)
     expanded = binary_dilation(occupancy.astype(bool), structure=structure, iterations=safety_voxels)
     return expanded.astype(np.uint8)
 
@@ -44,10 +44,6 @@ def expand_obstacles_3d(occupancy, safety_voxels=2):
 # 2. Build 3D Occupancy Grid from Point Cloud
 #############################################
 def build_occupancy_grid(points, global_min, resolution):
-    """
-    Given a Nx3 point cloud and a resolution (meters per voxel), builds a 3D occupancy grid.
-    Occupied voxels are marked as 1, free voxels as 0.
-    """
     extent = np.max(points, axis=0) - global_min
     nx_dim = int(np.ceil(extent[0] / resolution))
     ny_dim = int(np.ceil(extent[1] / resolution))
@@ -64,10 +60,6 @@ def build_occupancy_grid(points, global_min, resolution):
 # 3. Region Growing for Free Cuboids
 #############################################
 def region_growing_3d(occupancy, max_z_thickness=5):
-    """
-    Greedily grows free cuboids in X/Y while capping the thickness in Z to 'max_z_thickness'.
-    Returns a list of cuboid blocks (in grid indices).
-    """
     nx, ny, nz = occupancy.shape
     visited = np.zeros_like(occupancy, dtype=bool)
     cuboids = []
@@ -82,19 +74,16 @@ def region_growing_3d(occupancy, max_z_thickness=5):
                     changed = True
                     while changed:
                         changed = False
-                        # Expand in +x
                         if i_max < nx - 1:
                             candidate = occupancy[i_max+1, j_min:j_max+1, k_min:k_max+1]
                             if np.all(candidate == 0):
                                 i_max += 1
                                 changed = True
-                        # Expand in +y
                         if j_max < ny - 1:
                             candidate = occupancy[i_min:i_max+1, j_max+1, k_min:k_max+1]
                             if np.all(candidate == 0):
                                 j_max += 1
                                 changed = True
-                        # Expand in +z but cap thickness
                         current_z = k_max - k_min + 1
                         if current_z < max_z_thickness and k_max < nz - 1:
                             candidate = occupancy[i_min:i_max+1, j_min:j_max+1, k_max+1]
@@ -114,11 +103,6 @@ def region_growing_3d(occupancy, max_z_thickness=5):
 # 4. Convert Grid Cuboid to World Coordinates
 #############################################
 def block_to_world_cuboid(block, global_min, resolution):
-    """
-    Convert a block (min_idx and dimensions) to a dict with keys:
-      'lower', 'upper', 'dimensions_world'
-    in world coordinates.
-    """
     min_idx = block['min_idx']
     dims = block['dimensions']
     lower = global_min + (min_idx * resolution)
@@ -133,10 +117,6 @@ def block_to_world_cuboid(block, global_min, resolution):
 # 5. Strict Line-of-Sight Checking
 #############################################
 def line_of_sight_in_cuboids(cub1, cub2, step=0.05):
-    """
-    Returns True if the entire line segment from cub1 center to cub2 center
-    is contained in the union of cub1 and cub2.
-    """
     c1 = (cub1['lower'] + cub1['upper']) / 2.0
     c2 = (cub2['lower'] + cub2['upper']) / 2.0
     vec = c2 - c1
@@ -163,13 +143,6 @@ def point_in_cuboid(pt, cub):
 # 6. Build Cuboids with Connectivity (Graph on the Fly)
 #############################################
 def build_cuboids_with_connectivity(free_cuboids_blocks, global_min, resolution, step=0.05):
-    """
-    Convert each free cuboid block to world coordinates.
-    Then, for each cuboid, check connectivity with previously built cuboids.
-    Connectivity is added only if:
-      1) The cuboids touch/overlap.
-      2) The entire line between their centers lies in the union.
-    """
     cuboids = []
     for block in tqdm(free_cuboids_blocks, desc="Building cuboid connectivity"):
         cub = block_to_world_cuboid(block, global_min, resolution)
@@ -239,27 +212,15 @@ def build_cuboid_graph_from_cuboids(cuboids, tol=0.0):
 #############################################
 def build_exploration_path(G, exploration_factor, start_node=None):
     """
-    Performs a DFS from a start node (or random) on graph G.
-    Then, takes the first N nodes (N = exploration_factor * total nodes) and
-    connects consecutive nodes using A* (via networkx.astar_path) to form a continuous path.
+    Performs DFS from a start node (or random if None) on graph G.
+    Then, takes the first N nodes (N = exploration_factor * total nodes) from the DFS order.
     Returns a list of node indices representing the exploration path.
     """
     if start_node is None:
         start_node = random.choice(list(G.nodes))
     dfs_order = list(nx.dfs_preorder_nodes(G, source=start_node))
     target_count = max(1, int(exploration_factor * len(G.nodes)))
-    exploration_nodes = dfs_order[:target_count]
-    
-    exploration_path = []
-    for i in range(len(exploration_nodes)-1):
-        subpath = nx.astar_path(G, exploration_nodes[i], exploration_nodes[i+1],
-                                heuristic=lambda u, v: np.linalg.norm(
-                                    (G.nodes[u]['cuboid']['lower'] + G.nodes[u]['cuboid']['upper'])/2 -
-                                    (G.nodes[v]['cuboid']['lower'] + G.nodes[v]['cuboid']['upper'])/2),
-                                weight='weight')
-        if i > 0:
-            subpath = subpath[1:]
-        exploration_path.extend(subpath)
+    exploration_path = dfs_order[:target_count]
     return exploration_path
 
 #############################################
@@ -267,12 +228,6 @@ def build_exploration_path(G, exploration_factor, start_node=None):
 #############################################
 class RVizPublisher(Node):
     def __init__(self, points, cuboids, path_indices, exploration_path_coords, frame_id="map"):
-        """
-        :param points: Nx3 numpy array (point cloud)
-        :param cuboids: list of cuboid dicts with connectivity info.
-        :param path_indices: list of cuboid indices forming the direct path.
-        :param exploration_path_coords: list of 3D coordinates for the exploration path.
-        """
         super().__init__('rviz_los_planner')
         qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.QoSReliabilityPolicy.RELIABLE,
@@ -287,7 +242,7 @@ class RVizPublisher(Node):
         
         self.points = points
         self.cuboids = cuboids
-        self.path_indices = path_indices  # Direct path (cuboid indices)
+        self.path_indices = path_indices  # direct path (cuboid indices)
         self.frame_id = frame_id
         
         self.path_coords = []
@@ -414,26 +369,15 @@ class RVizPublisher(Node):
 #############################################
 def build_exploration_path(G, exploration_factor, start_node=None):
     """
-    Performs DFS from a start node (or random) on graph G.
-    Then takes the first N nodes (N = exploration_factor * total nodes) and connects consecutive nodes using A*,
-    returning a continuous exploration path (list of node indices).
+    Performs DFS from a start node (or random if None) on graph G.
+    Then takes the first N nodes (N = exploration_factor * total nodes) from the DFS order.
+    Returns a list of node indices representing the exploration path.
     """
     if start_node is None:
         start_node = random.choice(list(G.nodes))
     dfs_order = list(nx.dfs_preorder_nodes(G, source=start_node))
     target_count = max(1, int(exploration_factor * len(G.nodes)))
-    exploration_nodes = dfs_order[:target_count]
-    
-    exploration_path = []
-    for i in range(len(exploration_nodes)-1):
-        subpath = nx.astar_path(G, exploration_nodes[i], exploration_nodes[i+1],
-                                heuristic=lambda u, v: np.linalg.norm(
-                                    (G.nodes[u]['cuboid']['lower'] + G.nodes[u]['cuboid']['upper'])/2 -
-                                    (G.nodes[v]['cuboid']['lower'] + G.nodes[v]['cuboid']['upper'])/2),
-                                weight='weight')
-        if i > 0:
-            subpath = subpath[1:]
-        exploration_path.extend(subpath)
+    exploration_path = dfs_order[:target_count]
     return exploration_path
 
 #############################################
@@ -469,7 +413,7 @@ def main(args=None):
     blocks = region_growing_3d(occupancy_expanded, max_z_thickness)
     print("Found", len(blocks), "free cuboids.")
     
-    # Load or build cuboids with connectivity (and save them)
+    # Load or build cuboids with connectivity and save them
     cuboids_file = "my_cuboids.pkl"
     if os.path.exists(cuboids_file):
         print(f"Loading cuboids from {cuboids_file}...")
@@ -477,7 +421,9 @@ def main(args=None):
     else:
         print("Cuboids file not found. Building cuboids with connectivity...")
         cuboids = build_cuboids_with_connectivity(blocks, global_min, resolution, step=0.05)
-        # Save the cuboids for future runs
+        # Ensure each cuboid has the 'dimensions_world' field
+        for c in cuboids:
+            c['dimensions_world'] = c['upper'] - c['lower']
         save_cuboids(cuboids, cuboids_file)
         print(f"Saved cuboids to {cuboids_file}")
     
@@ -486,7 +432,18 @@ def main(args=None):
     # Build a graph from cuboids for exploration planning
     G_explore = build_cuboid_graph_from_cuboids(cuboids, tol=0.0)
     
-    # Randomly choose start and goal for direct path planning
+    # Randomly choose a start for exploration (only one is needed)
+    explore_start = random.choice(list(G_explore.nodes))
+    exploration_nodes = build_exploration_path(G_explore, exploration_factor=0.7, start_node=explore_start)
+    print("Exploration path (node indices):", exploration_nodes)
+    
+    exploration_path_coords = []
+    for idx in exploration_nodes:
+        cub = G_explore.nodes[idx]['cuboid']
+        center_pt = (cub['lower'] + cub['upper']) / 2.0
+        exploration_path_coords.append(center_pt)
+    
+    # For direct path planning, pick random start and goal
     start_idx = random.randint(0, len(cuboids)-1)
     goal_idx = random.randint(0, len(cuboids)-1)
     while goal_idx == start_idx:
@@ -500,16 +457,11 @@ def main(args=None):
     else:
         print("Direct path (node indices):", direct_path)
     
-    # Build an exploration path that covers a percentage of nodes (exploration factor)
-    exploration_factor = 0.7  # e.g., cover 70% of nodes in DFS order
-    exploration_nodes = build_exploration_path(G_explore, exploration_factor)
-    print("Exploration path (node indices):", exploration_nodes)
-    
-    exploration_path_coords = []
-    for idx in exploration_nodes:
-        cub = G_explore.nodes[idx]['cuboid']
+    path_coords = []
+    for idx in direct_path:
+        cub = cuboids[idx]
         center_pt = (cub['lower'] + cub['upper']) / 2.0
-        exploration_path_coords.append(center_pt)
+        path_coords.append(center_pt)
     
     # Publish to RViz: publish all cuboids, direct path cuboids, and exploration path
     node = RVizPublisher(points, cuboids, direct_path, exploration_path_coords, frame_id="map")
