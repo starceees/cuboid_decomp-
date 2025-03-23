@@ -135,14 +135,13 @@ def cuboids_touch_or_overlap(c1, c2, tol=0.0):
     return True
 
 #############################################
-# 6. Graph-Based Exploration Path Planning
+# 6. Graph-Based Exploration Path Planning (DFS-based)
 #############################################
 def build_exploration_path(G, exploration_factor, start_node=None):
     """
-    Given a connectivity graph G (networkx Graph) and an exploration factor (0 < factor <= 1),
-    perform a DFS (depth-first search) from a start node (or random if None) to get a DFS ordering.
-    Then, take the first N nodes (N = exploration_factor * total nodes) and create a continuous
-    path by planning A* subpaths between consecutive nodes using networkx.astar_path.
+    Performs a DFS from a start node (or random if None) on graph G.
+    Then, takes the first N nodes (N = exploration_factor * total nodes) and 
+    connects consecutive nodes using networkx.astar_path to build a continuous path.
     Returns a list of node indices representing the exploration path.
     """
     if start_node is None:
@@ -151,7 +150,6 @@ def build_exploration_path(G, exploration_factor, start_node=None):
     target_count = max(1, int(exploration_factor * len(G.nodes)))
     exploration_nodes = dfs_order[:target_count]
     
-    # Build a continuous path by connecting consecutive nodes
     exploration_path = []
     for i in range(len(exploration_nodes)-1):
         subpath = nx.astar_path(G, exploration_nodes[i], exploration_nodes[i+1],
@@ -160,7 +158,6 @@ def build_exploration_path(G, exploration_factor, start_node=None):
                                     (G.nodes[v]['cuboid']['lower'] + G.nodes[v]['cuboid']['upper'])/2),
                                 weight='weight')
         if i > 0:
-            # Remove the first node if it is same as last of previous to avoid duplication
             subpath = subpath[1:]
         exploration_path.extend(subpath)
     return exploration_path
@@ -201,7 +198,22 @@ def astar_on_cuboids(cuboids, start_idx, goal_idx):
     return None
 
 #############################################
-# 8. ROS2 Publisher Node for RViz2 Visualization + Path Publishing
+# 8. Build a Graph from Cuboids (for exploration planning)
+#############################################
+def build_cuboid_graph_from_cuboids(cuboids, tol=0.0):
+    G = nx.Graph()
+    for i, cub in enumerate(cuboids):
+        G.add_node(i, cuboid=cub)
+        for nb in cub.get('neighbors', []):
+            if not G.has_edge(i, nb):
+                center_i = (cub['lower'] + cub['upper']) / 2.0
+                center_j = (cuboids[nb]['lower'] + cuboids[nb]['upper']) / 2.0
+                weight = np.linalg.norm(center_i - center_j)
+                G.add_edge(i, nb, weight=weight)
+    return G
+
+#############################################
+# 9. ROS2 Publisher Node for RViz2 Visualization + Path Publishing
 #############################################
 class RVizPublisher(Node):
     def __init__(self, points, cuboids, path_coords, path_cuboid_indices, exploration_path_coords, frame_id="map"):
@@ -220,9 +232,9 @@ class RVizPublisher(Node):
         
         self.points = points
         self.cuboids = cuboids
-        self.path_coords = path_coords          # Continuous path (from A* planning between start and goal)
-        self.path_cuboid_indices = path_cuboid_indices  # The cuboids used in the A* path
-        self.exploration_path_coords = exploration_path_coords  # Exploration path coordinates (from DFS-based exploration)
+        self.path_coords = path_coords          # Continuous A* path (cuboid centers)
+        self.path_cuboid_indices = path_cuboid_indices  # Cuboid indices for direct path
+        self.exploration_path_coords = exploration_path_coords  # Exploration path coordinates
         self.frame_id = frame_id
         
         self.get_logger().info("3D Region Growing Publisher initialized.")
@@ -336,50 +348,38 @@ class RVizPublisher(Node):
         self.exploration_path_pub.publish(path_msg)
 
 #############################################
-# 9. Build Exploration Path from Graph (DFS-based)
+# 10. A* Path Planning on Cuboids using Their Connectivity
 #############################################
-def build_exploration_path(G, exploration_factor, start_node=None):
-    """
-    Performs a DFS from a start node (or random if None) on graph G.
-    Then, takes the first N nodes (N = exploration_factor * total nodes) and 
-    connects consecutive nodes using networkx.astar_path to build a continuous path.
-    Returns a list of node indices representing the exploration path.
-    """
-    if start_node is None:
-        start_node = random.choice(list(G.nodes))
-    dfs_order = list(nx.dfs_preorder_nodes(G, source=start_node))
-    target_count = max(1, int(exploration_factor * len(G.nodes)))
-    exploration_nodes = dfs_order[:target_count]
+def astar_on_cuboids(cuboids, start_idx, goal_idx):
+    def center(cub):
+        return (cub['lower'] + cub['upper']) / 2.0
+    def heuristic(i, j):
+        return np.linalg.norm(center(cuboids[i]) - center(cuboids[j]))
     
-    exploration_path = []
-    for i in range(len(exploration_nodes)-1):
-        subpath = nx.astar_path(G, exploration_nodes[i], exploration_nodes[i+1],
-                                heuristic=lambda u, v: np.linalg.norm(
-                                    (G.nodes[u]['cuboid']['lower'] + G.nodes[u]['cuboid']['upper'])/2 -
-                                    (G.nodes[v]['cuboid']['lower'] + G.nodes[v]['cuboid']['upper'])/2),
-                                weight='weight')
-        if i > 0:
-            subpath = subpath[1:]
-        exploration_path.extend(subpath)
-    return exploration_path
+    open_set = []
+    heapq.heappush(open_set, (heuristic(start_idx, goal_idx), 0, start_idx, [start_idx]))
+    closed = set()
+    best_cost = {start_idx: 0}
+    
+    while open_set:
+        f, g, current, path = heapq.heappop(open_set)
+        if current == goal_idx:
+            return path
+        if current in closed:
+            continue
+        closed.add(current)
+        for neighbor in cuboids[current].get('neighbors', []):
+            if neighbor in closed:
+                continue
+            tentative_g = g + heuristic(current, neighbor)
+            if neighbor not in best_cost or tentative_g < best_cost[neighbor]:
+                best_cost[neighbor] = tentative_g
+                f_val = tentative_g + heuristic(neighbor, goal_idx)
+                heapq.heappush(open_set, (f_val, tentative_g, neighbor, path + [neighbor]))
+    return None
 
 #############################################
-# 10. Build a Graph from Cuboids (for exploration path planning)
-#############################################
-def build_cuboid_graph_from_cuboids(cuboids, tol=0.0):
-    G = nx.Graph()
-    for i, cub in enumerate(cuboids):
-        G.add_node(i, cuboid=cub)
-        for nb in cub.get('neighbors', []):
-            if not G.has_edge(i, nb):
-                center_i = (cub['lower'] + cub['upper']) / 2.0
-                center_j = (cuboids[nb]['lower'] + cuboids[nb]['upper']) / 2.0
-                weight = np.linalg.norm(center_i - center_j)
-                G.add_edge(i, nb, weight=weight)
-    return G
-
-#############################################
-# 10. Main Routine
+# 11. Main Routine
 #############################################
 def main(args=None):
     rclpy.init(args=args)
@@ -415,9 +415,7 @@ def main(args=None):
     cuboids = build_cuboids_with_connectivity(free_cuboids_blocks, global_min, resolution, tol=0.0)
     
     # Optional: save connectivity graph image.
-    # We build a graph from the cuboids and save it using the neighbor info.
-    G = build_cuboid_graph_from_cuboids(cuboids, tol=0.0)
-    # Save the connectivity graph as an image.
+    # G = build_cuboid_graph_from_cuboids(cuboids, tol=0.0)
     # pos = nx.spring_layout(G, seed=42)
     # labels = {}
     # for node in G.nodes(data=True):
@@ -435,15 +433,14 @@ def main(args=None):
     # plt.close()
     # print("Saved cuboid connectivity graph to my_cuboid_graph.png")
     
-    # Choose start and goal cuboids randomly for exploration.
-    # (If desired, you could also use other criteria.)
+    # Choose start and goal cuboids randomly.
     start_idx = random.choice(range(len(cuboids)))
     goal_idx = random.choice(range(len(cuboids)))
     while goal_idx == start_idx:
         goal_idx = random.choice(range(len(cuboids)))
     print("Randomly chosen start cuboid index:", start_idx, "and goal cuboid index:", goal_idx)
     
-    # Plan a "direct" path using A* on the cuboid graph.
+    # Plan direct path using A* on the cuboids (using neighbor info built in)
     path_nodes = astar_on_cuboids(cuboids, start_idx, goal_idx)
     print("Planned cuboid path (node indices):", path_nodes)
     
@@ -466,8 +463,7 @@ def main(args=None):
         center_pt = (cub['lower'] + cub['upper']) / 2.0
         exploration_path_coords.append(center_pt)
     
-    # Publish to RViz: publish both all cuboids and the cuboids used for direct path planning,
-    # as well as the exploration path.
+    # Publish to RViz: publish all cuboids, the direct path cuboids, and the exploration path.
     node = RVizPublisher(points, cuboids, path_coords, path_cuboid_indices=path_nodes,
                          exploration_path_coords=exploration_path_coords, frame_id="map")
     try:
@@ -477,6 +473,18 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
+def build_cuboid_graph_from_cuboids(cuboids, tol=0.0):
+    G = nx.Graph()
+    for i, cub in enumerate(cuboids):
+        G.add_node(i, cuboid=cub)
+        for nb in cub.get('neighbors', []):
+            if not G.has_edge(i, nb):
+                center_i = (cub['lower'] + cub['upper']) / 2.0
+                center_j = (cuboids[nb]['lower'] + cuboids[nb]['upper']) / 2.0
+                weight = np.linalg.norm(center_i - center_j)
+                G.add_edge(i, nb, weight=weight)
+    return G
 
 if __name__ == "__main__":
     main()
