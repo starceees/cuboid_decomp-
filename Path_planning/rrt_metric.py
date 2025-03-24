@@ -4,17 +4,18 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped, Point
 import sensor_msgs_py.point_cloud2 as pc2
-import random, os, time
+import random, heapq, os, pickle, time
+
 from tqdm import tqdm
 
 #############################################
 # Utility: Convert grid index to world coordinate (center of voxel)
 #############################################
-def grid_to_world(idx, global_min, resolution):
+def grid_to_world_3d(idx, global_min, resolution):
     return global_min + (np.array(idx) + 0.5) * resolution
 
 #############################################
@@ -42,6 +43,7 @@ def expand_obstacles_3d(occupancy, safety_voxels=2):
 # 2. Build 3D Occupancy Grid from Point Cloud
 #############################################
 def build_occupancy_grid(points, global_min, resolution):
+    # Instead of filtering out z, we set min_point_z to a desired value (e.g. -1) and let the grid span multiple layers.
     extent = np.max(points, axis=0) - global_min
     nx_dim = int(np.ceil(extent[0] / resolution))
     ny_dim = int(np.ceil(extent[1] / resolution))
@@ -55,7 +57,7 @@ def build_occupancy_grid(points, global_min, resolution):
     return occupancy
 
 #############################################
-# 3. Collision-Free Checker and RRT Planner in Voxel Space
+# 3. Collision-Free Checker and RRT Planner
 #############################################
 def collision_free(occupancy, p1, p2, interp_resolution=0.5):
     p1 = np.array(p1, dtype=float)
@@ -77,10 +79,11 @@ def rrt_3d(occupancy, start, goal, max_iter=100000, step_size=10, z_upper=None):
     dims = occupancy.shape
     if z_upper is None or z_upper > dims[2]:
         z_upper = dims[2]
+    # Initialize tree and nodes list
     tree = {start: None}
     nodes = [start]
     for i in tqdm(range(max_iter), desc="RRT iterations"):
-        # Sample a random free voxel
+        # Sample a random free cell
         ix = np.random.randint(0, dims[0])
         iy = np.random.randint(0, dims[1])
         iz = np.random.randint(0, z_upper)
@@ -199,9 +202,6 @@ class RVizPublisher(Node):
         self.path_pub.publish(path_msg)
     
     def publish_drone_marker(self, stamp):
-        if not self.path_coords:
-            # No path available; nothing to publish.
-            return
         if len(self.path_coords) < 2:
             pos = self.path_coords[0]
         else:
@@ -235,95 +235,88 @@ class RVizPublisher(Node):
         self.drone_pub.publish(m)
 
 #############################################
-# 5. Main Routine: RRT Planning in Voxel Space with 5 Successive Waypoints & Metrics
+# 5. Main Routine: RRT Planning with 5 Successive Waypoints and Metrics
 #############################################
 def main(args=None):
     rclpy.init(args=args)
     
     # Load point cloud (Nx3 numpy array)
-    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy"  # Update as needed
+    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/point_cloud.npy"  # Update as needed
     points = np.load(pc_file)
-    # If loaded as structured array, convert to Nx3
     if points.dtype.names is not None:
         points = np.vstack([points[name] for name in ('x','y','z')]).T
 
-    # Print bounding box in world coordinates
+    # Instead of filtering out z completely, we no longer restrict the z–value.
+    # This way, the occupancy grid will have multiple layers if the point cloud has some z–variation.
+    # (If your point cloud is truly 2D, consider artificially padding the z–dimension.)
+    
+    # Compute bounding box (of the entire point cloud)
     global_min = np.min(points, axis=0)
     global_max = np.max(points, axis=0)
     print("Point Cloud Bounding Box:")
     print("  Min:", global_min)
     print("  Max:", global_max)
     
-    # Build occupancy grid and expand obstacles to add safety margin
+    # Build occupancy grid and expand obstacles
     resolution = 0.2
     occupancy = build_occupancy_grid(points, global_min, resolution)
     print(f"Occupancy grid shape: {occupancy.shape}, Occupied voxels: {occupancy.sum()}")
     safety_voxels = 2
     occupancy_expanded = expand_obstacles_3d(occupancy, safety_voxels)
     
-    # --- Sample 5 Unique Random Free-Space Waypoints from Occupancy Grid ---
+    # --- Sample 5 Random Free-Space Waypoints from the Occupancy Grid ---
     free_indices = np.argwhere(occupancy == 0)
-    free_indices = np.unique(free_indices, axis=0)
-    if free_indices.shape[0] < 5:
+    if len(free_indices) < 5:
         raise ValueError("Not enough free cells available!")
-    
-    # Sample indices directly from free_indices array
-    sample_indices = random.sample(range(len(free_indices)), 5)
-    waypoint_grid_indices = [tuple(free_indices[i]) for i in sample_indices]
-    waypoint_points = [grid_to_world(idx, global_min, resolution) for idx in waypoint_grid_indices]
-    
-    print("Random free-space waypoint coordinates (world):")
+    sampled_idx = free_indices[random.sample(range(len(free_indices)), 5)]
+    def grid_to_world(idx, global_min, resolution):
+        return global_min + (np.array(idx) + 0.5) * resolution
+    waypoint_points = [grid_to_world(idx, global_min, resolution) for idx in sampled_idx]
+    print("Random free-space waypoint coordinates:")
     for pt in waypoint_points:
         print(pt)
     
-    # --- Plan successive subpaths between the 5 waypoints using RRT in voxel space ---
+    # The sampled grid indices themselves are our free-space waypoints.
+    waypoint_grid_indices = [tuple(idx) for idx in sampled_idx]
+    
+    # --- Plan successive subpaths between the 5 waypoints using RRT ---
     num_segments = len(waypoint_grid_indices) - 1
     overall_path = []  # Combined grid path (list of grid indices)
     metrics = []       # (Segment, StartGrid, GoalGrid, ComputeTime, PathLength, TreeSize, SolutionNodes, StartPoint, GoalPoint)
     current_start = waypoint_grid_indices[0]
     for seg in range(num_segments):
         current_goal = waypoint_grid_indices[seg+1]
-        # Check for degenerate case
-        if current_start == current_goal:
-            print(f"Segment {seg+1}: Start and goal are identical; skipping planning.")
-            continue
         start_time = time.time()
         path_segment, tree_size = rrt_3d(occupancy_expanded, current_start, current_goal, max_iter=100000, step_size=10)
         compute_time = time.time() - start_time
         if path_segment is None:
             print(f"Segment {seg+1}: No path found from {current_start} to {current_goal}")
             continue
-        # Convert grid path to world coordinates to compute path length
+        # Convert grid path to world coordinates and compute path length
         path_world = [grid_to_world(pt, global_min, resolution) for pt in path_segment]
-        path_length = sum(np.linalg.norm(np.array(path_world[i+1]) - np.array(path_world[i]))
-                          for i in range(len(path_world)-1))
+        path_length = sum(np.linalg.norm(np.array(path_world[i+1]) - np.array(path_world[i])) for i in range(len(path_world)-1))
         sol_nodes = len(path_segment)
         metrics.append((seg+1, current_start, current_goal, compute_time, path_length, tree_size, sol_nodes,
-                        grid_to_world(current_start, global_min, resolution),
-                        grid_to_world(current_goal, global_min, resolution)))
+                        grid_to_world(current_start, global_min, resolution), grid_to_world(current_goal, global_min, resolution)))
         overall_path.extend(path_segment if seg == 0 else path_segment[1:])
         current_start = current_goal
         print(f"Segment {seg+1}: from {current_start} to {current_goal}, time: {compute_time:.3f}s, length: {path_length:.3f}m, TreeSize: {tree_size}, SolutionNodes: {sol_nodes}")
     
+    # Save metrics to a text file
     save_metrics(metrics, "metrics.txt")
     
-    # If no overall path was found, exit before creating the publisher node.
-    if not overall_path:
-        print("No valid overall path was found. Exiting without visualization.")
-        rclpy.shutdown()
-        return
-
-    # Build overall path in world coordinates using the single conversion function
-    overall_path_coords = [grid_to_world(pt, global_min, resolution) for pt in overall_path]
+    # Build overall path in world coordinates
+    overall_path_coords = [grid_to_world_3d(pt, global_min, resolution) for pt in overall_path]
     
     # Define drone mesh resource (using an STL file)
     drone_mesh_resource = "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
     
     # Create ROS2 publisher node for visualization using the overall path
     publisher_node = RVizPublisher(points, overall_path_coords, drone_mesh_resource, frame_id="map")
+    publisher_node.current_drone_index = 0
     publisher_node.current_segment_index = 0
     publisher_node.alpha = 0.0
-    publisher_node.alpha_increment = 0.02
+    publisher_node.alpha_increment = 0.02  # Adjust for smooth motion
     
     try:
         rclpy.spin(publisher_node)
