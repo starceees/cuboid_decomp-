@@ -241,7 +241,7 @@ def main(args=None):
     rclpy.init(args=args)
     
     # Load point cloud (Nx3 numpy array)
-    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy"  # Update as needed
+    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/occupancy_point_cloud.npy"  # Update as needed
     points = np.load(pc_file)
     # If loaded as structured array, convert to Nx3
     if points.dtype.names is not None:

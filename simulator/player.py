@@ -1,4 +1,4 @@
-from vis_nav_game import Player, Action
+#!/usr/bin/env python3
 import math
 import time
 import numpy as np
@@ -35,8 +35,8 @@ SAVE_FILENAME = "my_occupancy_map.npy"  # Output .npy file
 # BGR color map for blocky images
 COLOR_MAP = {
     UNKNOWN_VAL: np.array([255, 255, 255], dtype=np.uint8),  # white
-    WALL_VAL: np.array([0, 0, 255], dtype=np.uint8),           # red
-    PATH_VAL: np.array([0, 255, 255], dtype=np.uint8)          # yellow
+    WALL_VAL: np.array([0, 0, 255], dtype=np.uint8),         # red
+    PATH_VAL: np.array([0, 255, 255], dtype=np.uint8)        # yellow
 }
 
 # -------------------------------------------------------------------------
@@ -74,8 +74,8 @@ def occupancy_to_rgb(occ):
     H, W = occ.shape
     rgb = np.zeros((H, W, 3), dtype=np.uint8)
     rgb[occ == UNKNOWN_VAL] = [255, 255, 255]  # white
-    rgb[occ == WALL_VAL] = [255, 0, 0]           # red
-    rgb[occ == PATH_VAL] = [255, 255, 0]         # yellow
+    rgb[occ == WALL_VAL] = [255, 0, 0]         # red (note BGR->RGB shift in show)
+    rgb[occ == PATH_VAL] = [255, 255, 0]       # yellow
     return rgb
 
 def convert_occ_to_blocky_image(occ, cell_size=10):
@@ -167,12 +167,11 @@ def build_stereo_point_cloud(prev_img, curr_img, baseline, K):
 def get_transform_matrix(state):
     """Create a transformation matrix from robot state to world coordinates"""
     x, y, theta = state.flatten()
-    # Create the transformation matrix (rotation + translation)
     transform = np.array([
         [math.cos(theta), -math.sin(theta), 0, x],
-        [math.sin(theta), math.cos(theta), 0, y],
-        [0, 0, 1, 0],
-        [0, 0, 0, 1]
+        [math.sin(theta),  math.cos(theta), 0, y],
+        [0,               0,                1, 0],
+        [0,               0,                0, 1]
     ])
     return transform
 
@@ -191,20 +190,18 @@ def transform_points(points, transform_matrix):
     # Convert back from homogeneous coordinates
     return transformed_points[:, :3]
 
-# Helper function for A* path planning
 def astar_white(grid, start, goal):
     """
     A* path planning on a grid with white (255) as free cells.
     Returns a list of (i,j) indices forming the path from start to goal.
     """
-    # Helpers
     def heuristic(a, b):
         # Manhattan distance
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
     
     def neighbors(node):
-        # Define 8-connected neighborhood
-        dirs = [(0, 1), (1, 0), (0, -1), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]
+        dirs = [(0, 1), (1, 0), (0, -1), (-1, 0), 
+                (1, 1), (-1, 1), (1, -1), (-1, -1)]
         result = []
         for d in dirs:
             neighbor = (node[0] + d[0], node[1] + d[1])
@@ -214,7 +211,6 @@ def astar_white(grid, start, goal):
                 result.append(neighbor)
         return result
     
-    # Initialize data structures
     frontier = [(0, start)]  # Priority queue: (f_score, node)
     came_from = {}
     g_score = {start: 0}
@@ -239,15 +235,13 @@ def astar_white(grid, start, goal):
         for next_node in neighbors(current):
             if next_node in explored:
                 continue
-                
             tentative_g = g_score[current] + 1
-            
             if next_node not in g_score or tentative_g < g_score[next_node]:
                 came_from[next_node] = current
                 g_score[next_node] = tentative_g
                 f_score[next_node] = tentative_g + heuristic(next_node, goal)
                 
-                # Update the frontier
+                # Update frontier
                 frontier = [(f, n) for f, n in frontier if n != next_node]
                 frontier.append((f_score[next_node], next_node))
         
@@ -256,6 +250,8 @@ def astar_white(grid, start, goal):
 # -------------------------------------------------------------------------
 # Main Player Class: EKF + Visual Measurement + Data Logging
 # -------------------------------------------------------------------------
+from vis_nav_game import Player, Action
+
 class KeyboardPlayerPyGame(Player):
     def __init__(self):
         super().__init__()
@@ -495,7 +491,55 @@ if __name__=="__main__":
         plt.axis('off')
         plt.show()
 
-    # --- Point Cloud Generation and Visualization (UPDATED) ---
+        # ---------------------------------------------------------------------
+        # Create a simple 3D point cloud from the final occupancy grid
+        # ---------------------------------------------------------------------
+        nH, nW = merged_dil.shape
+        occupancy_points = []
+        colors = []  # optional color array
+
+        # We'll fill all non-path cells from z=0 to z=5 in small steps
+        # Path cells will have a single point at z=0 only.
+        z_min = 0.0
+        z_max = 5.0
+        num_z_steps = 6  # e.g. 0,1,2,3,4,5
+
+        for i in range(nH):
+            for j in range(nW):
+                val = merged_dil[i, j]
+                
+                # Convert (i, j) -> (x, y) in world coords (center of cell)
+                x = origin[0] + (j + 0.5) * NEW_RESOLUTION
+                y = origin[1] + (i + 0.5) * NEW_RESOLUTION
+
+                if val == PATH_VAL:
+                    # Path cell: single ground point at z=0
+                    occupancy_points.append([x, y, 0.0])
+                    colors.append([0.0, 1.0, 0.0])  # green for path
+                else:
+                    # Non-path cell (wall or unknown):
+                    # fill a vertical column from z=0 to z=5
+                    for zc in np.linspace(z_min, z_max, num_z_steps):
+                        occupancy_points.append([x, y, zc])
+                        colors.append([1.0, 0.0, 0.0])  # red for blocked region
+
+        occupancy_points = np.array(occupancy_points, dtype=np.float32)
+        colors = np.array(colors, dtype=np.float32)
+
+        pc_occupancy = o3d.geometry.PointCloud()
+        pc_occupancy.points = o3d.utility.Vector3dVector(occupancy_points)
+        pc_occupancy.colors = o3d.utility.Vector3dVector(colors)
+
+        # Save as PLY
+        o3d.io.write_point_cloud("occupancy_point_cloud.ply", pc_occupancy)
+        print("Saved 3D occupancy point cloud to 'occupancy_point_cloud.ply'")
+
+        # Also save as NPY (just the raw point data)
+        np.save("occupancy_point_cloud.npy", occupancy_points)
+        print("Saved 3D occupancy points (x,y,z) to 'occupancy_point_cloud.npy'")
+
+
+    # --- Point Cloud Generation and Visualization from stereo data (optional) ---
     if len(player.mapping_data) > 1:
         all_points = []
         path_points = []  # To store robot path points for visualization
@@ -516,48 +560,39 @@ if __name__=="__main__":
             if baseline < MIN_BASELINE:
                 continue
             
-            # IMPORTANT: We generate stereo point cloud using consecutive frames
+            # Generate stereo point cloud using consecutive frames
             local_points = build_stereo_point_cloud(img_prev, img_curr, baseline, player.K)
             
             if len(local_points) > 0:
-                # The important change: Create a transformation specific to this frame pair
-                # We'll use the MIDPOINT between prev and curr states for better localization
+                # Midpoint transform
                 mid_state = np.zeros((3, 1))
-                mid_state[0, 0] = (state_prev[0, 0] + state_curr[0, 0]) / 2  # X midpoint
-                mid_state[1, 0] = (state_prev[1, 0] + state_curr[1, 0]) / 2  # Y midpoint
-                mid_state[2, 0] = (state_prev[2, 0] + state_curr[2, 0]) / 2  # Theta midpoint
+                mid_state[0, 0] = (state_prev[0, 0] + state_curr[0, 0]) / 2
+                mid_state[1, 0] = (state_prev[1, 0] + state_curr[1, 0]) / 2
+                mid_state[2, 0] = (state_prev[2, 0] + state_curr[2, 0]) / 2
                 
-                # Create a camera-to-world transform based on robot position
                 world_transform = np.eye(4)
                 theta = mid_state[2, 0]
-                
-                # Rotation component (around Z axis)
                 world_transform[0:3, 0:3] = np.array([
                     [math.cos(theta), -math.sin(theta), 0],
-                    [math.sin(theta), math.cos(theta), 0],
-                    [0, 0, 1]
+                    [math.sin(theta),  math.cos(theta), 0],
+                    [0,               0,                1]
                 ])
-                
-                # Translation component (X, Y, Z=0)
                 world_transform[0, 3] = mid_state[0, 0]
                 world_transform[1, 3] = mid_state[1, 0]
                 
-                # Transform local points to world frame
+                # Convert local_points -> world_points
                 homogeneous_points = np.ones((len(local_points), 4))
                 homogeneous_points[:, :3] = local_points
                 world_points = (homogeneous_points @ world_transform.T)[:, :3]
                 
-                # Filter out points that are too far from the robot path
-                # This helps remove outliers from the stereo matching
-                max_distance = 3.0  # Maximum distance from robot path in meters
+                # Filter out far outliers
+                max_distance = 3.0
                 filtered_points = []
-                for point in world_points:
-                    x, y, z = point
-                    dist_to_robot = np.linalg.norm(point[:2] - mid_state[:2].flatten())
+                for pt in world_points:
+                    dist_to_robot = np.linalg.norm(pt[:2] - mid_state[:2].flatten())
                     if dist_to_robot < max_distance:
-                        filtered_points.append(point)
+                        filtered_points.append(pt)
                 
-                # Add to overall point cloud
                 if filtered_points:
                     all_points.extend(filtered_points)
                     print(f"Frame {i}: Added {len(filtered_points)} points to world frame")
@@ -565,34 +600,34 @@ if __name__=="__main__":
         print(f"Total points generated: {len(all_points)}")
         
         if len(all_points) > 0:
-            # Create point cloud from environment points
             all_points = np.array(all_points)
             pc = o3d.geometry.PointCloud()
             pc.points = o3d.utility.Vector3dVector(all_points)
             
-            # Add colors to points based on height
+            # Simple color scheme based on Z
             colors = np.zeros((len(all_points), 3))
             z_values = all_points[:, 2]
             z_min, z_max = np.min(z_values), np.max(z_values)
             if z_max > z_min:
                 normalized_z = (z_values - z_min) / (z_max - z_min)
-                colors[:, 0] = 1 - normalized_z  # Red decreases with height
-                colors[:, 1] = normalized_z      # Green increases with height
-                pc.colors = o3d.utility.Vector3dVector(colors)
+                # Red->Green gradient
+                colors[:, 0] = 1 - normalized_z
+                colors[:, 1] = normalized_z
+            pc.colors = o3d.utility.Vector3dVector(colors)
             
-            # Create robot path line set for visualization
+            # Create a line set for robot path
             path_points = np.array(path_points)
             lines = [[i, i+1] for i in range(len(path_points)-1)]
             line_set = o3d.geometry.LineSet()
             line_set.points = o3d.utility.Vector3dVector(path_points)
             line_set.lines = o3d.utility.Vector2iVector(lines)
-            line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])  # Red lines
+            line_set.colors = o3d.utility.Vector3dVector([[1, 0, 0] for _ in range(len(lines))])
             
-            # Optional: statistical outlier removal for cleaner visualization
+            # Optional outlier removal
             pc, _ = pc.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
             
-            # Visualize point cloud and robot path together
-            print("Displaying point cloud with robot path in Open3D.")
+            # Visualize in Open3D
+            print("Displaying stereo-based point cloud + path in Open3D.")
             o3d.visualization.draw_geometries([pc, line_set])
         else:
             print("No point cloud data generated from mapping data.")

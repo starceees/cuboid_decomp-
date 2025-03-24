@@ -290,7 +290,7 @@ class RVizPublisher(Node):
         self.path_pub.publish(path_msg)
 
 #############################################
-# 8. Plot and Save Cuboid Graph (Optional)
+# 8. (Optional) Plot and Save Cuboid Graph
 #############################################
 def plot_and_save_cuboid_graph(cuboids, out_file="cuboid_graph.png"):
     # Build a graph from cuboids using their stored neighbor info.
@@ -321,7 +321,18 @@ def plot_and_save_cuboid_graph(cuboids, out_file="cuboid_graph.png"):
     print(f"Saved cuboid connectivity graph to {out_file}")
 
 #############################################
-# 9. Main Routine
+# 9. Metrics Saving Function
+#############################################
+def save_metrics(metrics, filename="metrics.txt"):
+    with open(filename, "w") as f:
+        f.write("Attempt\tStartCuboid\tGoalCuboid\tComputeTime(s)\tPathLength(m)\tSolutionNodes\n")
+        for m in metrics:
+            attempt, start_idx, goal_idx, comp_time, path_length, sol_nodes = m
+            f.write(f"{attempt}\t{start_idx}\t{goal_idx}\t{comp_time:.3f}\t{path_length:.3f}\t{sol_nodes}\n")
+    print("Metrics saved to", filename)
+
+#############################################
+# 10. Main Routine
 #############################################
 def main(args=None):
     rclpy.init(args=args)
@@ -353,25 +364,31 @@ def main(args=None):
     free_cuboids_blocks = region_growing_3d(occupancy_expanded, max_z_thickness=max_z_thickness)
     print("Number of free cuboids found:", len(free_cuboids_blocks))
     
-    # Convert blocks to world coordinates and build connectivity as we go.
+    # Convert blocks to world coordinates and build connectivity.
     cuboids = build_cuboids_with_connectivity(free_cuboids_blocks, global_min, resolution, tol=0.0)
     
-    # Optional: save connectivity graph image.
+    # (Optional) Save connectivity graph.
     # plot_and_save_cuboid_graph(cuboids, out_file="my_cuboid_graph.png")
     
     # Randomly sample start and goal cuboids until a valid path is found.
     path_nodes = None
+    metrics_list = []  # To store metrics from each attempt if desired.
     max_attempts = 10
-    attempt = 0
-    while path_nodes is None and attempt < max_attempts:
+    successful_metric = None
+    for attempt in range(max_attempts):
         start_idx = random.choice(range(len(cuboids)))
         goal_idx = random.choice(range(len(cuboids)))
         while goal_idx == start_idx:
             goal_idx = random.choice(range(len(cuboids)))
         print(f"Attempt {attempt+1}: Trying start_idx = {start_idx}, goal_idx = {goal_idx}")
-        path_nodes = astar_on_cuboids(cuboids, start_idx, goal_idx)
-        attempt += 1
-
+        t0 = time.time()
+        candidate_path = astar_on_cuboids(cuboids, start_idx, goal_idx)
+        t1 = time.time()
+        search_time = t1 - t0
+        if candidate_path is not None:
+            path_nodes = candidate_path
+            successful_metric = (attempt+1, start_idx, goal_idx, search_time)
+            break
     if path_nodes is None:
         print("Failed to find a connected path after several attempts.")
         return
@@ -383,6 +400,18 @@ def main(args=None):
         cub = cuboids[idx]
         center_pt = (cub['lower'] + cub['upper']) / 2.0
         path_coords.append(center_pt)
+    
+    # Compute path length (in world coordinates)
+    path_length = 0.0
+    for i in range(len(path_coords)-1):
+        path_length += np.linalg.norm(np.array(path_coords[i+1]) - np.array(path_coords[i]))
+    sol_nodes = len(path_nodes)
+    
+    # Save metrics (only for the successful attempt)
+    if successful_metric is not None:
+        metric_entry = (successful_metric[0], successful_metric[1], successful_metric[2],
+                        successful_metric[3], path_length, sol_nodes)
+        save_metrics([metric_entry], filename="metrics_a_star.txt")
     
     # Publish to RViz: publish all cuboids and the subset used for path planning.
     node = RVizPublisher(points, cuboids, path_coords, path_cuboid_indices=path_nodes, frame_id="map")
