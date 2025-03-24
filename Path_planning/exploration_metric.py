@@ -8,15 +8,11 @@ from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped, Point
 import sensor_msgs_py.point_cloud2 as pc2
-import random
-import heapq
-import os
-import pickle
+import random, heapq, os, pickle, time
 
 # Additional imports for progress and graph plotting
 from tqdm import tqdm
 import networkx as nx
-import matplotlib.pyplot as plt
 
 #############################################
 # Saving / Loading Functions
@@ -191,52 +187,7 @@ def astar_on_cuboids(cuboids, start_idx, goal_idx):
     return None
 
 #############################################
-# 8. Build a Graph from Cuboids (for Exploration)
-#############################################
-def build_cuboid_graph_from_cuboids(cuboids, tol=0.0, step=0.05):
-    G = nx.Graph()
-    n = len(cuboids)
-    for i in range(n):
-        G.add_node(i, cuboid=cuboids[i])
-    for i in range(n):
-        for j in range(i+1, n):
-            if cuboids_touch_or_overlap(cuboids[i], cuboids[j], tol):
-                if line_of_sight_in_cuboids(cuboids[i], cuboids[j], step=step):
-                    center_i = (cuboids[i]['lower'] + cuboids[i]['upper']) / 2.0
-                    center_j = (cuboids[j]['lower'] + cuboids[j]['upper']) / 2.0
-                    weight = np.linalg.norm(center_i - center_j)
-                    G.add_edge(i, j, weight=weight)
-    return G
-
-#############################################
-# 9. DFS-based Exploration Path Planning with Radius
-#############################################
-def build_exploration_path_radius(G, start_node, radius=10.0):
-    explored = set()
-    path = []
-    current = start_node
-    explored.add(current)
-    path.append(current)
-    while True:
-        current_center = (G.nodes[current]['cuboid']['lower'] + G.nodes[current]['cuboid']['upper']) / 2.0
-        candidates = []
-        for nb in G.neighbors(current):
-            if nb not in explored:
-                nb_center = (G.nodes[nb]['cuboid']['lower'] + G.nodes[nb]['cuboid']['upper']) / 2.0
-                d = np.linalg.norm(nb_center - current_center)
-                if d <= radius:
-                    candidates.append((nb, d))
-        if not candidates:
-            break
-        candidates.sort(key=lambda x: x[1])
-        next_node = candidates[0][0]
-        path.append(next_node)
-        explored.add(next_node)
-        current = next_node
-    return path
-
-#############################################
-# 10. Update Connectivity for Filtered Cuboids
+# 8. Update Connectivity for Cuboids
 #############################################
 def update_connectivity(cuboids, step=0.05, tol=0.0):
     n = len(cuboids)
@@ -250,11 +201,11 @@ def update_connectivity(cuboids, step=0.05, tol=0.0):
                     cuboids[j]['neighbors'].append(i)
 
 #############################################
-# 11. ROS2 Publisher Node for RViz2 Visualization + Path + Drone Mesh
+# 9. ROS2 Publisher Node for RViz2 Visualization + Path + Drone Mesh
 #############################################
 class RVizPublisher(Node):
-    def __init__(self, points, cuboids, path_indices, exploration_path_coords, drone_mesh_resource, frame_id="map"):
-        super().__init__('rviz_los_planner')
+    def __init__(self, points, cuboids, path_indices, drone_mesh_resource, frame_id="map"):
+        super().__init__('rviz_cuboid_astar')
         qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.QoSReliabilityPolicy.RELIABLE,
             history=rclpy.qos.QoSHistoryPolicy.KEEP_LAST,
@@ -264,7 +215,7 @@ class RVizPublisher(Node):
         self.marker_pub_all = self.create_publisher(MarkerArray, '/free_cuboids', qos)
         self.marker_pub_path = self.create_publisher(MarkerArray, '/path_cuboids', qos)
         self.line_path_pub = self.create_publisher(Marker, '/line_path', qos)
-        self.exploration_path_pub = self.create_publisher(Path, '/exploration_path', qos)
+        self.path_pub = self.create_publisher(Path, '/planned_path', qos)
         self.drone_pub = self.create_publisher(Marker, '/drone_mesh', qos)
         
         self.points = points
@@ -278,16 +229,14 @@ class RVizPublisher(Node):
             center = (c['lower'] + c['upper']) / 2.0
             self.path_coords.append(center)
         
-        self.exploration_path_coords = exploration_path_coords
-        
-        self.drone_mesh_resource = drone_mesh_resource  # e.g., "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
+        self.drone_mesh_resource = drone_mesh_resource  # e.g., "file:///home/your_path/mesh.stl"
         # For continuous drone motion, use segment interpolation:
         self.current_segment_index = 0
         self.alpha = 0.0
-        self.alpha_increment = 0.02  # Smaller increment for smoother motion
+        self.alpha_increment = 0.02  # Adjust for smoothness
         
-        self.timer = self.create_timer(0.1, self.publish_all)  # Faster update rate for smooth motion
-        self.get_logger().info("LOS Planner Node initialized.")
+        self.timer = self.create_timer(0.1, self.publish_all)
+        self.get_logger().info("Cuboid + A* Node initialized.")
     
     def publish_all(self):
         now = self.get_clock().now().to_msg()
@@ -295,9 +244,9 @@ class RVizPublisher(Node):
         self.publish_all_cuboids(now)
         self.publish_path_cuboids(now)
         self.publish_line_path(now)
-        self.publish_exploration_path(now)
+        self.publish_path(now)
         self.publish_drone_marker(now)
-        self.get_logger().info("Published point cloud, cuboids, paths, and drone mesh.")
+        self.get_logger().info("Published point cloud, cuboids, path, and drone mesh.")
     
     def publish_point_cloud(self, stamp):
         header = Header()
@@ -376,7 +325,7 @@ class RVizPublisher(Node):
         marker.id = 0
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
-        marker.scale.x = 0.2  # Adjust line thickness here
+        marker.scale.x = 0.2  # Adjust thickness here
         marker.color.r = 1.0
         marker.color.g = 0.0
         marker.color.b = 0.0
@@ -390,11 +339,12 @@ class RVizPublisher(Node):
             marker.points.append(p)
         self.line_path_pub.publish(marker)
     
-    def publish_exploration_path(self, stamp):
+    def publish_path(self, stamp):
+        # Publish the direct path as a nav_msgs/Path
         path_msg = Path()
         path_msg.header.stamp = stamp
         path_msg.header.frame_id = self.frame_id
-        for pt in self.exploration_path_coords:
+        for pt in self.path_coords:
             pose = PoseStamped()
             pose.header.stamp = stamp
             pose.header.frame_id = self.frame_id
@@ -403,19 +353,15 @@ class RVizPublisher(Node):
             pose.pose.position.z = float(pt[2])
             pose.pose.orientation.w = 1.0
             path_msg.poses.append(pose)
-        self.exploration_path_pub.publish(path_msg)
+        self.path_pub.publish(path_msg)
     
     def publish_drone_marker(self, stamp):
-        # If no direct path is available, use the first exploration point as fallback
+        # Interpolate between waypoints in the direct path
         if len(self.path_coords) < 2:
-            if len(self.exploration_path_coords) > 0:
-                pos = self.exploration_path_coords[0]
-            else:
-                return  # Nothing to publish
+            pos = self.path_coords[0]
         else:
-            # Interpolate between waypoints in the direct path
             if self.current_segment_index >= len(self.path_coords) - 1:
-                self.current_segment_index = 0  # Loop back to the beginning
+                self.current_segment_index = 0
             pt1 = np.array(self.path_coords[self.current_segment_index])
             pt2 = np.array(self.path_coords[self.current_segment_index + 1])
             pos = (1 - self.alpha) * pt1 + self.alpha * pt2
@@ -424,8 +370,7 @@ class RVizPublisher(Node):
                 self.alpha = 0.0
                 self.current_segment_index += 1
                 if self.current_segment_index >= len(self.path_coords) - 1:
-                    self.current_segment_index = 0  # Loop back
-        
+                    self.current_segment_index = 0
         m = Marker()
         m.header.frame_id = self.frame_id
         m.header.stamp = stamp
@@ -445,19 +390,19 @@ class RVizPublisher(Node):
         self.drone_pub.publish(m)
 
 #############################################
-# 12. Main Routine
+# 12. Main Routine: Cuboid Decomp + A* with Successive Waypoints
 #############################################
 def main(args=None):
     rclpy.init(args=args)
     
     # Load point cloud (Nx3 numpy array)
-    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/point_cloud.npy"  # update as needed
+    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy"  # update as needed
     points = np.load(pc_file)
     if points.dtype.names is not None:
         points = np.vstack([points[name] for name in ('x','y','z')]).T
-    
-    # Filter point cloud to only include points above a minimum z value
-    min_point_z = 0.0  # set desired minimum z threshold
+
+    # Filter point cloud to only include points with z >= 0
+    min_point_z = 0.0  
     points = points[points[:,2] >= min_point_z]
     
     # Compute bounding box (of filtered points)
@@ -477,7 +422,7 @@ def main(args=None):
     occupancy_expanded = expand_obstacles_3d(occupancy, safety_voxels)
     
     # Region growing for free cuboids
-    max_z_thickness = 20  # adjust as needed
+    max_z_thickness = 20  
     blocks = region_growing_3d(occupancy_expanded, max_z_thickness)
     print("Found", len(blocks), "free cuboids.")
     
@@ -496,63 +441,65 @@ def main(args=None):
     
     print(f"Total cuboids loaded: {len(cuboids)}")
     
-    # Update connectivity for cuboids (if needed)
+    # Update connectivity for cuboids
     update_connectivity(cuboids, step=0.05, tol=0.0)
     
-    # Build a graph from cuboids for exploration planning
-    G_explore = build_cuboid_graph_from_cuboids(cuboids, tol=0.0, step=0.05)
+    # Now, plan successive subpaths between 5 waypoints using cuboid A*
+    num_segments = 5
+    metrics = []   # List to hold metrics for each segment
+    overall_path = []  # Combined list of cuboid indices for the overall path
+    # Randomly choose initial start and goal (from cuboids)
+    current_start = random.randint(0, len(cuboids)-1)
+    current_goal = random.randint(0, len(cuboids)-1)
+    while current_goal == current_start:
+        current_goal = random.randint(0, len(cuboids)-1)
     
-    # For exploration: Start at the center of the bounding box at z=0
-    exploration_origin = np.array([ (global_min[0]+global_max[0])/2.0,
-                                    (global_min[1]+global_max[1])/2.0,
-                                    0.0 ])
-    start_node = None
-    min_dist = float("inf")
-    for i, cub in enumerate(cuboids):
-        center = (cub['lower'] + cub['upper']) / 2.0
-        d = np.linalg.norm(center - exploration_origin)
-        if d < min_dist:
-            min_dist = d
-            start_node = i
-    print("Exploration start node:", start_node)
+    for seg in range(num_segments):
+        # For each segment, compute A* path
+        start_time = time.time()
+        path_segment = astar_on_cuboids(cuboids, current_start, current_goal)
+        compute_time = time.time() - start_time
+        if path_segment is None:
+            print(f"Segment {seg+1}: No path found from {current_start} to {current_goal}")
+            continue
+        # Compute path length as sum of Euclidean distances between consecutive cuboid centers
+        path_length = 0.0
+        for i in range(len(path_segment)-1):
+            c1 = (cuboids[path_segment[i]]['lower'] + cuboids[path_segment[i]]['upper']) / 2.0
+            c2 = (cuboids[path_segment[i+1]]['lower'] + cuboids[path_segment[i+1]]['upper']) / 2.0
+            path_length += np.linalg.norm(c2 - c1)
+        metrics.append((seg+1, current_start, current_goal, compute_time, path_length))
+        overall_path.extend(path_segment if seg==0 else path_segment[1:])  # avoid duplicating nodes between segments
+        print(f"Segment {seg+1}: from {current_start} to {current_goal}, time: {compute_time:.3f}s, length: {path_length:.3f}m")
+        # For next segment, set start = current goal and choose new random goal (different from current goal)
+        current_start = current_goal
+        current_goal = random.randint(0, len(cuboids)-1)
+        while current_goal == current_start:
+            current_goal = random.randint(0, len(cuboids)-1)
     
-    # Build exploration path using a radius (10m)
-    exploration_nodes = build_exploration_path_radius(G_explore, start_node, radius=10.0)
-    print("Exploration path (node indices):", exploration_nodes)
-    exploration_path_coords = []
-    for idx in exploration_nodes:
-        cub = G_explore.nodes[idx]['cuboid']
-        center_pt = (cub['lower'] + cub['upper']) / 2.0
-        exploration_path_coords.append(center_pt)
+    # Write metrics to a text file
+    with open("metrics.txt", "w") as f:
+        f.write("Segment\tStart\tGoal\tComputeTime(s)\tPathLength(m)\n")
+        for seg, s, g, t, L in metrics:
+            f.write(f"{seg}\t{s}\t{g}\t{t:.3f}\t{L:.3f}\n")
+    print("Metrics saved to metrics.txt")
     
-    # For direct path planning: choose random start and goal from cuboids
-    start_idx = random.randint(0, len(cuboids)-1)
-    goal_idx = random.randint(0, len(cuboids)-1)
-    while goal_idx == start_idx:
-        goal_idx = random.randint(0, len(cuboids)-1)
-    print("Direct path: start =", start_idx, "goal =", goal_idx)
-    
-    direct_path = astar_on_cuboids(cuboids, start_idx, goal_idx)
-    if direct_path is None:
-        print("No direct path found!")
-        direct_path = []
-    else:
-        print("Direct path (node indices):", direct_path)
-    
-    path_coords = []
-    for idx in direct_path:
-        cub = cuboids[idx]
-        center_pt = (cub['lower'] + cub['upper']) / 2.0
-        path_coords.append(center_pt)
+    # Build list of centers for the overall path
+    overall_path_coords = []
+    for idx in overall_path:
+        c = cuboids[idx]
+        center = (c['lower'] + c['upper']) / 2.0
+        overall_path_coords.append(center)
     
     # Define your drone mesh resource (using an STL file)
     drone_mesh_resource = "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
     
-    publisher_node = RVizPublisher(points, cuboids, direct_path, exploration_path_coords, drone_mesh_resource, frame_id="map")
+    # Create ROS2 publisher node for visualization using the overall path
+    publisher_node = RVizPublisher(points, cuboids, overall_path, drone_mesh_resource, frame_id="map")
     publisher_node.current_drone_index = 0
     publisher_node.current_segment_index = 0
     publisher_node.alpha = 0.0
-    publisher_node.alpha_increment = 0.02  # Adjust for smoother motion
+    publisher_node.alpha_increment = 0.02  # Adjust for smooth motion
     
     try:
         rclpy.spin(publisher_node)
@@ -561,33 +508,6 @@ def main(args=None):
     finally:
         publisher_node.destroy_node()
         rclpy.shutdown()
-
-#############################################
-# 13. DFS-based Exploration Path Planning with Radius
-#############################################
-def build_exploration_path_radius(G, start_node, radius=10.0):
-    explored = set()
-    path = []
-    current = start_node
-    explored.add(current)
-    path.append(current)
-    while True:
-        current_center = (G.nodes[current]['cuboid']['lower'] + G.nodes[current]['cuboid']['upper']) / 2.0
-        candidates = []
-        for nb in G.neighbors(current):
-            if nb not in explored:
-                nb_center = (G.nodes[nb]['cuboid']['lower'] + G.nodes[nb]['cuboid']['upper']) / 2.0
-                d = np.linalg.norm(nb_center - current_center)
-                if d <= radius:
-                    candidates.append((nb, d))
-        if not candidates:
-            break
-        candidates.sort(key=lambda x: x[1])
-        next_node = candidates[0][0]
-        path.append(next_node)
-        explored.add(next_node)
-        current = next_node
-    return path
 
 if __name__ == "__main__":
     main()
