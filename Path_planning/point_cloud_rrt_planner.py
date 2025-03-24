@@ -274,7 +274,7 @@ def main(args=None):
         current_goal = waypoints[seg + 1]
         print(f"Planning segment {seg+1}: from {current_start} to {current_goal}")
         start_time = time.time()
-        path_segment, tree_size = rrt_3d(occupancy_safety, current_start, current_goal, max_iter=5000000, step_size=20000, z_upper=z_upper)
+        path_segment, tree_size = rrt_3d(occupancy_safety, current_start, current_goal, max_iter=500, step_size=20, z_upper=z_upper)
         compute_time = time.time() - start_time
         
         if path_segment is None:
@@ -299,7 +299,7 @@ def main(args=None):
             overall_path.extend(path_segment)
         current_start = current_goal
     
-    save_metrics(metrics, "metrics.txt")
+    save_metrics(metrics, "metrics_rrt.txt")
     
     if not overall_path:
         print("No valid overall path was found. Exiting without visualization.")

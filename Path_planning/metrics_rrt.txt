@@ -1,0 +1,4 @@
+Segment	StartGrid	GoalGrid	ComputeTime(s)	PathLength(m)	TreeSize	SolutionNodes
+1	(225, 281, 2)	(46, 257, 11)	0.070	61.455	169	18
+2	(46, 257, 11)	(231, 95, 0)	0.174	115.583	308	30
+5	(50, 107, 29)	(39, 73, 12)	0.005	11.110	19	4
