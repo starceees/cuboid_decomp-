@@ -10,7 +10,6 @@ from geometry_msgs.msg import PoseStamped, Point
 import sensor_msgs_py.point_cloud2 as pc2
 import random, heapq, os, pickle, time
 
-# Additional imports for progress and graph plotting
 from tqdm import tqdm
 import networkx as nx
 
@@ -201,7 +200,7 @@ def update_connectivity(cuboids, step=0.05, tol=0.0):
                     cuboids[j]['neighbors'].append(i)
 
 #############################################
-# 9. ROS2 Publisher Node for RViz2 Visualization + Path + Drone Mesh
+# 9. ROS2 Publisher Node for Cuboid Decomp + A*
 #############################################
 class RVizPublisher(Node):
     def __init__(self, points, cuboids, path_indices, drone_mesh_resource, frame_id="map"):
@@ -229,11 +228,11 @@ class RVizPublisher(Node):
             center = (c['lower'] + c['upper']) / 2.0
             self.path_coords.append(center)
         
-        self.drone_mesh_resource = drone_mesh_resource  # e.g., "file:///home/your_path/mesh.stl"
+        self.drone_mesh_resource = drone_mesh_resource  # e.g., "file:///path/to/mesh.stl"
         # For continuous drone motion, use segment interpolation:
         self.current_segment_index = 0
         self.alpha = 0.0
-        self.alpha_increment = 0.02  # Adjust for smoothness
+        self.alpha_increment = 0.02
         
         self.timer = self.create_timer(0.1, self.publish_all)
         self.get_logger().info("Cuboid + A* Node initialized.")
@@ -325,7 +324,7 @@ class RVizPublisher(Node):
         marker.id = 0
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
-        marker.scale.x = 0.2  # Adjust thickness here
+        marker.scale.x = 0.2
         marker.color.r = 1.0
         marker.color.g = 0.0
         marker.color.b = 0.0
@@ -340,7 +339,6 @@ class RVizPublisher(Node):
         self.line_path_pub.publish(marker)
     
     def publish_path(self, stamp):
-        # Publish the direct path as a nav_msgs/Path
         path_msg = Path()
         path_msg.header.stamp = stamp
         path_msg.header.frame_id = self.frame_id
@@ -356,7 +354,6 @@ class RVizPublisher(Node):
         self.path_pub.publish(path_msg)
     
     def publish_drone_marker(self, stamp):
-        # Interpolate between waypoints in the direct path
         if len(self.path_coords) < 2:
             pos = self.path_coords[0]
         else:
@@ -390,7 +387,7 @@ class RVizPublisher(Node):
         self.drone_pub.publish(m)
 
 #############################################
-# 12. Main Routine: Cuboid Decomp + A* with Successive Waypoints
+# 10. Main Routine: Cuboid Decomp + A* with Successive Waypoints
 #############################################
 def main(args=None):
     rclpy.init(args=args)
@@ -402,7 +399,7 @@ def main(args=None):
         points = np.vstack([points[name] for name in ('x','y','z')]).T
 
     # Filter point cloud to only include points with z >= 0
-    min_point_z = 0.0  
+    min_point_z = -1.0  
     points = points[points[:,2] >= min_point_z]
     
     # Compute bounding box (of filtered points)
@@ -444,51 +441,74 @@ def main(args=None):
     # Update connectivity for cuboids
     update_connectivity(cuboids, step=0.05, tol=0.0)
     
-    # Now, plan successive subpaths between 5 waypoints using cuboid A*
-    num_segments = 5
-    metrics = []   # List to hold metrics for each segment
-    overall_path = []  # Combined list of cuboid indices for the overall path
-    # Randomly choose initial start and goal (from cuboids)
-    current_start = random.randint(0, len(cuboids)-1)
-    current_goal = random.randint(0, len(cuboids)-1)
-    while current_goal == current_start:
-        current_goal = random.randint(0, len(cuboids)-1)
+    # --- Sampling Waypoints from Free Space ---
+    # Get free cell indices from occupancy grid (cells with 0)
+    free_indices = np.argwhere(occupancy == 0)
+    # Randomly sample 5 free cell indices
+    if len(free_indices) < 5:
+        raise ValueError("Not enough free cells available!")
+    sampled_idx = free_indices[random.sample(range(len(free_indices)), 5)]
+    # Convert these grid indices to world coordinates (center of voxel)
+    def grid_to_world(idx, global_min, resolution):
+        return global_min + (np.array(idx) + 0.5) * resolution
+    waypoint_points = [grid_to_world(idx, global_min, resolution) for idx in sampled_idx]
+    print("Random free-space waypoint coordinates:")
+    for pt in waypoint_points:
+        print(pt)
     
+    # For each waypoint, find the nearest cuboid center (as our planning node)
+    waypoint_cuboid_indices = []
+    for pt in waypoint_points:
+        best_idx = None
+        best_dist = float("inf")
+        for i, cub in enumerate(cuboids):
+            center = (cub['lower'] + cub['upper']) / 2.0
+            d = np.linalg.norm(center - pt)
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+        waypoint_cuboid_indices.append(best_idx)
+    print("Waypoints (cuboid indices):", waypoint_cuboid_indices)
+    
+    # Now, plan successive subpaths between the 5 waypoints using A* on cuboids.
+    num_segments = len(waypoint_cuboid_indices) - 1
+    overall_path = []
+    metrics = []  # (segment, start_idx, goal_idx, compute_time, path_length, start_point, goal_point)
+    current_start = waypoint_cuboid_indices[0]
     for seg in range(num_segments):
-        # For each segment, compute A* path
+        current_goal = waypoint_cuboid_indices[seg+1]
         start_time = time.time()
-        path_segment = astar_on_cuboids(cuboids, current_start, current_goal)
+        subpath = astar_on_cuboids(cuboids, current_start, current_goal)
         compute_time = time.time() - start_time
-        if path_segment is None:
+        if subpath is None:
             print(f"Segment {seg+1}: No path found from {current_start} to {current_goal}")
             continue
-        # Compute path length as sum of Euclidean distances between consecutive cuboid centers
+        # Compute path length (sum of distances between consecutive cuboid centers)
         path_length = 0.0
-        for i in range(len(path_segment)-1):
-            c1 = (cuboids[path_segment[i]]['lower'] + cuboids[path_segment[i]]['upper']) / 2.0
-            c2 = (cuboids[path_segment[i+1]]['lower'] + cuboids[path_segment[i+1]]['upper']) / 2.0
+        for i in range(len(subpath)-1):
+            c1 = (cuboids[subpath[i]]['lower'] + cuboids[subpath[i]]['upper']) / 2.0
+            c2 = (cuboids[subpath[i+1]]['lower'] + cuboids[subpath[i+1]]['upper']) / 2.0
             path_length += np.linalg.norm(c2 - c1)
-        metrics.append((seg+1, current_start, current_goal, compute_time, path_length))
-        overall_path.extend(path_segment if seg==0 else path_segment[1:])  # avoid duplicating nodes between segments
-        print(f"Segment {seg+1}: from {current_start} to {current_goal}, time: {compute_time:.3f}s, length: {path_length:.3f}m")
-        # For next segment, set start = current goal and choose new random goal (different from current goal)
+        metrics.append((seg+1, current_start, current_goal, compute_time, path_length, 
+                        waypoint_points[seg], waypoint_points[seg+1]))
+        # For overall path, concatenate subpath (avoiding duplicate node at junction)
+        overall_path.extend(subpath if seg == 0 else subpath[1:])
         current_start = current_goal
-        current_goal = random.randint(0, len(cuboids)-1)
-        while current_goal == current_start:
-            current_goal = random.randint(0, len(cuboids)-1)
+        print(f"Segment {seg+1}: from {current_start} to {current_goal}, time: {compute_time:.3f}s, length: {path_length:.3f}m")
     
-    # Write metrics to a text file
+    # Save metrics to file
     with open("metrics.txt", "w") as f:
-        f.write("Segment\tStart\tGoal\tComputeTime(s)\tPathLength(m)\n")
-        for seg, s, g, t, L in metrics:
-            f.write(f"{seg}\t{s}\t{g}\t{t:.3f}\t{L:.3f}\n")
+        f.write("Segment\tStartCuboid\tGoalCuboid\tComputeTime(s)\tPathLength(m)\tStartPoint\tGoalPoint\n")
+        for seg, s, g, t, L, sp, gp in metrics:
+            sp_str = f"({sp[0]:.2f}, {sp[1]:.2f}, {sp[2]:.2f})"
+            gp_str = f"({gp[0]:.2f}, {gp[1]:.2f}, {gp[2]:.2f})"
+            f.write(f"{seg}\t{s}\t{g}\t{t:.3f}\t{L:.3f}\t{sp_str}\t{gp_str}\n")
     print("Metrics saved to metrics.txt")
     
-    # Build list of centers for the overall path
+    # Build overall path centers (list of cuboid centers)
     overall_path_coords = []
     for idx in overall_path:
-        c = cuboids[idx]
-        center = (c['lower'] + c['upper']) / 2.0
+        center = (cuboids[idx]['lower'] + cuboids[idx]['upper']) / 2.0
         overall_path_coords.append(center)
     
     # Define your drone mesh resource (using an STL file)
