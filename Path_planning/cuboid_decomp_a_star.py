@@ -43,6 +43,7 @@ def build_occupancy_grid(points, global_min, resolution):
     ny_dim = int(np.ceil(extent[1] / resolution))
     nz_dim = int(np.ceil(extent[2] / resolution))
     occupancy = np.zeros((nx_dim, ny_dim, nz_dim), dtype=np.uint8)
+    
     idxs = np.floor((points - global_min) / resolution).astype(int)
     idxs = np.clip(idxs, 0, [nx_dim-1, ny_dim-1, nz_dim-1])
     for (ix, iy, iz) in idxs:
@@ -154,39 +155,10 @@ def build_cuboids_with_connectivity(free_cuboids_blocks, global_min, resolution,
     return cuboids
 
 #############################################
-# 7. A* on the Cuboid Graph (Coarse Path)
-#############################################
-def astar_on_cuboids(cuboids, start_idx, goal_idx):
-    def center(cub):
-        return (cub['lower'] + cub['upper']) / 2.0
-    def heuristic(i, j):
-        return np.linalg.norm(center(cuboids[i]) - center(cuboids[j]))
-    open_set = []
-    best_cost = {start_idx: 0}
-    visited = set()
-    heapq.heappush(open_set, (heuristic(start_idx, goal_idx), 0, start_idx, [start_idx]))
-    while open_set:
-        open_set.sort(key=lambda x: x[0])
-        f, g, current, path = open_set.pop(0)
-        if current == goal_idx:
-            return path
-        if current in visited:
-            continue
-        visited.add(current)
-        for nb in cuboids[current]['neighbors']:
-            if nb in visited:
-                continue
-            cost_new = g + heuristic(current, nb)
-            if nb not in best_cost or cost_new < best_cost[nb]:
-                best_cost[nb] = cost_new
-                f_new = cost_new + heuristic(nb, goal_idx)
-                heapq.heappush(open_set, (f_new, cost_new, nb, path + [nb]))
-    return None
-
-#############################################
-# 8. BFS Corridor Extraction
+# 7. BFS Corridor on the Cuboid Graph
 #############################################
 def bfs_cuboid_corridor(cuboids, start_idx, goal_idx):
+    """Return a list of cuboid indices forming a corridor from start_idx to goal_idx."""
     queue = deque([[start_idx]])
     visited = set()
     while queue:
@@ -203,7 +175,7 @@ def bfs_cuboid_corridor(cuboids, start_idx, goal_idx):
     return None
 
 #############################################
-# 9. Build a 3D Corridor Grid and 3D A* Planner
+# 8. 3D Corridor Grid + A* in 3D
 #############################################
 def create_3d_corridor_grid(cuboids, corridor_indices, grid_resolution=0.1):
     xs, ys, zs = [], [], []
@@ -222,6 +194,7 @@ def create_3d_corridor_grid(cuboids, corridor_indices, grid_resolution=0.1):
     ny = int(np.ceil(height / grid_resolution))
     nz = int(np.ceil(depth / grid_resolution))
     grid = np.zeros((nz, ny, nx), dtype=np.uint8)  # grid[z,y,x]
+
     for i in range(nz):
         for j in range(ny):
             for k in range(nx):
@@ -237,9 +210,11 @@ def create_3d_corridor_grid(cuboids, corridor_indices, grid_resolution=0.1):
                         free = True
                         break
                 grid[i, j, k] = 1 if free else 0
+
     return grid, min_x, min_y, min_z, nx, ny, nz
 
 def astar_grid_3d(grid, start_idx, goal_idx):
+    """26-connected 3D A* on a voxel grid. Returns (path_of_indices, expansions, solution_nodes)."""
     moves = []
     for di in [-1,0,1]:
         for dj in [-1,0,1]:
@@ -249,6 +224,7 @@ def astar_grid_3d(grid, start_idx, goal_idx):
                 moves.append((di, dj, dk))
     def heuristic(a, b):
         return np.linalg.norm(np.array(a) - np.array(b))
+    
     open_list = []
     visited = set()
     expansions = 0
@@ -257,6 +233,7 @@ def astar_grid_3d(grid, start_idx, goal_idx):
     f0 = heuristic(start_idx, goal_idx)
     best_cost[start_idx] = 0
     heapq.heappush(open_list, (f0, g0, start_idx, [start_idx]))
+    
     while open_list:
         open_list.sort(key=lambda x: x[0])
         f, g, current, path = open_list.pop(0)
@@ -266,21 +243,22 @@ def astar_grid_3d(grid, start_idx, goal_idx):
         if current in visited:
             continue
         visited.add(current)
-        for move in moves:
-            ni = current[0] + move[0]
-            nj = current[1] + move[1]
-            nk = current[2] + move[2]
+        for (di, dj, dk) in moves:
+            ni = current[0] + di
+            nj = current[1] + dj
+            nk = current[2] + dk
             if 0 <= ni < grid.shape[0] and 0 <= nj < grid.shape[1] and 0 <= nk < grid.shape[2]:
                 if grid[ni, nj, nk] == 1:
-                    cost_new = g + np.linalg.norm(np.array((ni, nj, nk)) - np.array(current))
-                    if (ni, nj, nk) not in best_cost or cost_new < best_cost[(ni, nj, nk)]:
-                        best_cost[(ni, nj, nk)] = cost_new
-                        fn = cost_new + heuristic((ni, nj, nk), goal_idx)
-                        open_list.append((fn, cost_new, (ni, nj, nk), path + [(ni, nj, nk)]))
+                    cost_new = g + np.linalg.norm(np.array((ni,nj,nk)) - np.array(current))
+                    if (ni, nj, nk) not in best_cost or cost_new < best_cost[(ni,nj,nk)]:
+                        best_cost[(ni,nj,nk)] = cost_new
+                        fn = cost_new + heuristic((ni,nj,nk), goal_idx)
+                        open_list.append((fn, cost_new, (ni,nj,nk), path + [(ni,nj,nk)]))
     return None, expansions, 0
 
-def astar_in_corridor_3d(cuboids, corridor, start_xyz, goal_xyz, grid_res=0.1):
-    grid, min_x, min_y, min_z, nx, ny, nz = create_3d_corridor_grid(cuboids, corridor, grid_res)
+def astar_in_corridor_3d(cuboids, corridor_indices, start_xyz, goal_xyz, grid_res=0.1):
+    """Build a local 3D grid for corridor_indices, run 3D A*, return path + metrics."""
+    grid, min_x, min_y, min_z, nx, ny, nz = create_3d_corridor_grid(cuboids, corridor_indices, grid_res)
     sx = (start_xyz[0] - min_x) / grid_res
     sy = (start_xyz[1] - min_y) / grid_res
     sz = (start_xyz[2] - min_z) / grid_res
@@ -289,24 +267,28 @@ def astar_in_corridor_3d(cuboids, corridor, start_xyz, goal_xyz, grid_res=0.1):
     gz = (goal_xyz[2] - min_z) / grid_res
     start_idx = (int(sz), int(sy), int(sx))
     goal_idx  = (int(gz), int(gy), int(gx))
+
     path_idx, expansions, sol_nodes = astar_grid_3d(grid, start_idx, goal_idx)
     if path_idx is None:
-        return None, expansions, 0.0, 0, start_idx, goal_idx
+        return None
+
+    # Convert path of grid indices back to world coords
     path_world = []
-    for (i, j, k) in path_idx:
-        wx = min_x + (k + 0.5)*grid_res
-        wy = min_y + (j + 0.5)*grid_res
-        wz = min_z + (i + 0.5)*grid_res
+    for (iz, iy, ix) in path_idx:
+        wx = min_x + (ix + 0.5)*grid_res
+        wy = min_y + (iy + 0.5)*grid_res
+        wz = min_z + (iz + 0.5)*grid_res
         path_world.append([wx, wy, wz])
+
+    # Compute path length in 3D
     path_length = 0.0
-    for m in range(len(path_world)-1):
-        p0 = np.array(path_world[m])
-        p1 = np.array(path_world[m+1])
-        path_length += np.linalg.norm(p1 - p0)
-    return path_world, expansions, path_length, sol_nodes, start_idx, goal_idx
+    for i in range(len(path_world)-1):
+        path_length += np.linalg.norm(np.array(path_world[i+1]) - np.array(path_world[i]))
+
+    return (path_world, expansions, path_length, sol_nodes, start_idx, goal_idx)
 
 #############################################
-# 10. Update Connectivity for Cuboids
+# 9. Update Connectivity for Cuboids
 #############################################
 def update_connectivity(cuboids, step=0.05, tol=0.0):
     n = len(cuboids)
@@ -320,14 +302,16 @@ def update_connectivity(cuboids, step=0.05, tol=0.0):
                     cuboids[j]['neighbors'].append(i)
 
 #############################################
-# 11. Find Nearest Cuboid for a Given Waypoint
+# 10. Find Nearest Cuboid for a Given Waypoint
 #############################################
 def find_nearest_cuboid_index(waypoint, cuboids):
     min_dist = float("inf")
     best_idx = None
     for i, cub in enumerate(cuboids):
+        # Check if the waypoint lies within the cuboid
         if np.all(waypoint >= cub['lower']) and np.all(waypoint <= cub['upper']):
             return i
+        # Otherwise measure distance to center
         center = (cub['lower'] + cub['upper']) / 2.0
         dist = np.linalg.norm(waypoint - center)
         if dist < min_dist:
@@ -336,16 +320,14 @@ def find_nearest_cuboid_index(waypoint, cuboids):
     return best_idx
 
 #############################################
-# 12. Hierarchical (3D) Planning with Straight-Line Shortcut
+# 11. Straight-Line Check in 3D Corridor
 #############################################
-def linear_path_3d(start, goal, num_points=20):
-    return [start + t*(goal - start) for t in np.linspace(0, 1, num_points)]
-
-def is_line_in_corridor_3d(cuboids, corridor, start, goal, num_samples=50):
+def is_line_in_corridor_3d(cuboids, corridor_indices, start_pt, goal_pt, num_samples=50):
+    """Check if the line from start_pt to goal_pt is fully inside corridor."""
     for t in np.linspace(0, 1, num_samples):
-        pt = start + t*(goal - start)
+        pt = start_pt + t*(goal_pt - start_pt)
         in_corridor = False
-        for idx in corridor:
+        for idx in corridor_indices:
             c = cuboids[idx]
             if (pt[0] >= c['lower'][0] and pt[0] <= c['upper'][0] and
                 pt[1] >= c['lower'][1] and pt[1] <= c['upper'][1] and
@@ -356,12 +338,15 @@ def is_line_in_corridor_3d(cuboids, corridor, start, goal, num_samples=50):
             return False
     return True
 
+def linear_path_3d(start_pt, goal_pt, num_points=20):
+    return [start_pt + t*(goal_pt - start_pt) for t in np.linspace(0, 1, num_points)]
+
 #############################################
-# 13. RVizPublisher: 3D Visualization of Environment, Corridor, and Path
+# 12. RVizPublisher
 #############################################
 class RVizPublisher(Node):
-    def __init__(self, points, cuboids, corridor_indices, path_coords_3d, drone_mesh_resource, waypoints, frame_id="map"):
-        super().__init__('rviz_los_planner')
+    def __init__(self, points, cuboids, corridor_indices, path_coords_3d, frame_id="map", drone_mesh_resource=None):
+        super().__init__('rviz_cuboid_astar')
         qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.QoSReliabilityPolicy.RELIABLE,
             history=rclpy.qos.QoSHistoryPolicy.KEEP_LAST,
@@ -371,25 +356,24 @@ class RVizPublisher(Node):
         self.marker_pub_all = self.create_publisher(MarkerArray, '/free_cuboids', qos)
         self.marker_pub_corridor = self.create_publisher(MarkerArray, '/corridor_cuboids', qos)
         self.line_path_pub = self.create_publisher(Marker, '/line_path', qos)
-        self.drone_pub = self.create_publisher(Marker, '/drone_mesh', qos)
         self.path_pub = self.create_publisher(Path, '/planned_path', qos)
-        self.waypoint_pub = self.create_publisher(MarkerArray, '/waypoints', qos)
-
+        self.drone_pub = self.create_publisher(Marker, '/drone_mesh', qos)
+        
         self.points = points
         self.cuboids = cuboids
         self.corridor_indices = corridor_indices
-        self.path_coords = path_coords_3d
-        self.waypoints = waypoints
-        self.drone_mesh_resource = drone_mesh_resource
+        self.path_coords = path_coords_3d  # final 3D path
         self.frame_id = frame_id
-
+        
+        self.drone_mesh_resource = drone_mesh_resource or ""
+        
         self.current_segment_index = 0
         self.alpha = 0.0
         self.alpha_increment = 0.02
-
+        
         self.timer = self.create_timer(0.1, self.publish_all)
-        self.get_logger().info("LOS Planner Node initialized.")
-
+        self.get_logger().info("Cuboid + A* Node initialized.")
+    
     def publish_all(self):
         now = self.get_clock().now().to_msg()
         self.publish_point_cloud(now)
@@ -398,8 +382,8 @@ class RVizPublisher(Node):
         self.publish_line_path(now)
         self.publish_path(now)
         self.publish_drone_marker(now)
-        self.publish_waypoints(now)
-
+        self.get_logger().info("Published point cloud, cuboids, path, etc.")
+    
     def publish_point_cloud(self, stamp):
         header = Header()
         header.stamp = stamp
@@ -407,15 +391,13 @@ class RVizPublisher(Node):
         pc_list = self.points.tolist()
         pc_msg = pc2.create_cloud_xyz32(header, pc_list)
         self.pc_pub.publish(pc_msg)
-
+    
     def publish_all_cuboids(self, stamp):
         marker_array = MarkerArray()
         mid = 0
         for cub in self.cuboids:
-            lower = cub['lower']
-            upper = cub['upper']
+            center = (cub['lower'] + cub['upper']) / 2.0
             dims = cub['dimensions_world']
-            center = (lower + upper) / 2.0
             m = Marker()
             m.header.frame_id = self.frame_id
             m.header.stamp = stamp
@@ -437,16 +419,14 @@ class RVizPublisher(Node):
             m.color.a = 0.2
             marker_array.markers.append(m)
         self.marker_pub_all.publish(marker_array)
-
+    
     def publish_corridor_cuboids(self, stamp):
         marker_array = MarkerArray()
         mid = 0
         for idx in self.corridor_indices:
             cub = self.cuboids[idx]
-            lower = cub['lower']
-            upper = cub['upper']
+            center = (cub['lower'] + cub['upper']) / 2.0
             dims = cub['dimensions_world']
-            center = (lower + upper) / 2.0
             m = Marker()
             m.header.frame_id = self.frame_id
             m.header.stamp = stamp
@@ -468,7 +448,7 @@ class RVizPublisher(Node):
             m.color.a = 0.3
             marker_array.markers.append(m)
         self.marker_pub_corridor.publish(marker_array)
-
+    
     def publish_line_path(self, stamp):
         marker = Marker()
         marker.header.frame_id = self.frame_id
@@ -477,7 +457,7 @@ class RVizPublisher(Node):
         marker.id = 0
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
-        marker.scale.x = 0.1
+        marker.scale.x = 0.2
         marker.color.r = 0.0
         marker.color.g = 0.0
         marker.color.b = 1.0
@@ -490,7 +470,7 @@ class RVizPublisher(Node):
             p.z = float(pt[2])
             marker.points.append(p)
         self.line_path_pub.publish(marker)
-
+    
     def publish_path(self, stamp):
         path_msg = Path()
         path_msg.header.stamp = stamp
@@ -505,7 +485,7 @@ class RVizPublisher(Node):
             pose.pose.orientation.w = 1.0
             path_msg.poses.append(pose)
         self.path_pub.publish(path_msg)
-
+    
     def publish_drone_marker(self, stamp):
         if len(self.path_coords) < 2:
             return
@@ -538,32 +518,8 @@ class RVizPublisher(Node):
         m.color.a = 1.0
         self.drone_pub.publish(m)
 
-    def publish_waypoints(self, stamp):
-        marker_array = MarkerArray()
-        for idx, wp in enumerate(self.waypoints):
-            m = Marker()
-            m.header.frame_id = self.frame_id
-            m.header.stamp = stamp
-            m.ns = "waypoints"
-            m.id = idx
-            m.type = Marker.SPHERE
-            m.action = Marker.ADD
-            m.pose.position.x = float(wp[0])
-            m.pose.position.y = float(wp[1])
-            m.pose.position.z = float(wp[2])
-            m.pose.orientation.w = 1.0
-            m.scale.x = 0.5
-            m.scale.y = 0.5
-            m.scale.z = 0.5
-            m.color.r = 0.0
-            m.color.g = 0.0
-            m.color.b = 1.0
-            m.color.a = 1.0
-            marker_array.markers.append(m)
-        self.waypoint_pub.publish(marker_array)
-
 #############################################
-# 14. MAIN Routine with Hierarchical 3D Planning and Metrics
+# 13. MAIN
 #############################################
 def main(args=None):
     rclpy.init(args=args)
@@ -573,18 +529,23 @@ def main(args=None):
     points = np.load(pc_file)
     if points.dtype.names is not None:
         points = np.vstack([points[name] for name in ('x','y','z')]).T
-    min_point_z = 0.0  # use full 3D
+    
+    # Filter out below z=0 if desired
+    min_point_z = 0.0
     points = points[points[:,2] >= min_point_z]
+    
     global_min = np.min(points, axis=0)
     global_max = np.max(points, axis=0)
     print("Point Cloud Bounding Box:")
     print("  Min:", global_min)
     print("  Max:", global_max)
     
-    # Build occupancy grid and expand obstacles
+    # Build occupancy grid
     resolution = 0.2
     occupancy = build_occupancy_grid(points, global_min, resolution)
     print(f"Occupancy grid shape: {occupancy.shape}, Occupied voxels: {occupancy.sum()}")
+    
+    # Expand obstacles
     safety_voxels = 2
     occupancy_expanded = expand_obstacles_3d(occupancy, safety_voxels)
     
@@ -593,7 +554,7 @@ def main(args=None):
     blocks = region_growing_3d(occupancy_expanded, max_z_thickness)
     print("Found", len(blocks), "free cuboids.")
     
-    # Build cuboid connectivity
+    # Build or load cuboids
     cuboids_file = "my_cuboids_hos.pkl"
     t0_cub = time.time()
     if os.path.exists(cuboids_file):
@@ -607,109 +568,96 @@ def main(args=None):
         save_cuboids(cuboids, cuboids_file)
         print(f"Saved cuboids to {cuboids_file}")
     t1_cub = time.time()
-    cuboid_time = t1_cub - t0_cub
-    print(f"Cuboid decomposition time: {cuboid_time:.3f} seconds")
+    print(f"Cuboid decomposition time: {t1_cub - t0_cub:.3f} seconds")
     print(f"Total cuboids loaded: {len(cuboids)}")
+    
+    # Update connectivity
     update_connectivity(cuboids, step=0.05, tol=0.0)
     
-    # Choose free-space waypoints (retain full 3D values)
-    num_waypoints = 5
-    free_voxel_indices = np.argwhere(occupancy_expanded == 0)
-    if len(free_voxel_indices) < num_waypoints:
-        print("Not enough free voxels for waypoint selection.")
-        return
-    selected_indices = random.sample(range(len(free_voxel_indices)), num_waypoints)
-    waypoints = []
-    for idx in selected_indices:
-        voxel_idx = free_voxel_indices[idx]
-        wp = global_min + (voxel_idx + 0.5) * resolution
-        waypoints.append(wp)
-    waypoints = [np.array(wp) for wp in waypoints]
-    print("Selected free-space waypoints:")
-    for wp in waypoints:
-        print(wp)
+    # Plan successive subpaths between random cuboid indices
+    num_segments = 5
+    metrics = []
+    overall_3d_path = []
     
-    # For each waypoint, find nearest cuboid index
-    waypoint_indices = [find_nearest_cuboid_index(wp, cuboids) for wp in waypoints]
-    print("Nearest cuboid indices for waypoints:", waypoint_indices)
+    current_start = random.randint(0, len(cuboids)-1)
+    current_goal = random.randint(0, len(cuboids)-1)
+    while current_goal == current_start:
+        current_goal = random.randint(0, len(cuboids)-1)
     
-    # For each consecutive waypoint pair, use hierarchical planning:
-    final_3d_path = []
-    path_planning_times = []
-    metric_lines = []
-    segment_count = 0
-    all_corridors = set()
-
-    # Helper: linear interpolation in 3D
-    def linear_path_3d(start, goal, num_points=20):
-        return [start + t*(goal - start) for t in np.linspace(0, 1, num_points)]
-
-    for i in range(num_waypoints - 1):
-        print("Processing segment", i+1)
-        s_wp = waypoints[i]
-        g_wp = waypoints[i+1]
-        s_idx = waypoint_indices[i]
-        g_idx = waypoint_indices[i+1]
-        segment_count += 1
-
-        corridor = bfs_cuboid_corridor(cuboids, s_idx, g_idx)
+    def center_of_cuboid(cub):
+        return (cub['lower'] + cub['upper']) / 2.0
+    
+    for seg in range(num_segments):
+        print(f"\nSegment {seg+1}: start={current_start}, goal={current_goal}")
+        # BFS corridor
+        corridor = bfs_cuboid_corridor(cuboids, current_start, current_goal)
+        start_time = time.time()
         if corridor is None:
-            print(f"No corridor found between waypoint {i} and {i+1}!")
-            continue
-        for c_idx in corridor:
-            all_corridors.add(c_idx)
-
-        # First, try straight-line interpolation if it is entirely within the corridor
-        if is_line_in_corridor_3d(cuboids, corridor, s_wp, g_wp, num_samples=50):
-            path_world = linear_path_3d(s_wp, g_wp, num_points=20)
-            expansions = 0
-            sol_nodes = 2
-            path_length = np.linalg.norm(g_wp - s_wp)
-            compute_time = 0.001  # nearly zero
-            startG = (None, None, None)
-            goalG = (None, None, None)
-            print(f"Segment {segment_count}: Using straight-line interpolation.")
+            print("No corridor found!")
+            compute_time = time.time() - start_time
+            metrics.append((seg+1, current_start, current_goal, compute_time, 0.0))
         else:
-            print(f"Segment {segment_count}: Running 3D A* in corridor.")
-            t0_path = time.time()
-            result = astar_in_corridor_3d(cuboids, corridor, s_wp, g_wp, grid_res=0.1)
-            t1_path = time.time()
-            compute_time = t1_path - t0_path
-            if result is None:
-                print(f"No fine 3D path found in corridor for segment {segment_count}!")
-                continue
-            path_world, expansions, path_length, sol_nodes, startG, goalG = result
-
-        path_planning_times.append(compute_time)
-        if i == 0:
-            final_3d_path.extend(path_world)
-        else:
-            final_3d_path.extend(path_world[1:])
-
-        seg_str = f"{segment_count}\t{startG}\t{goalG}\t{compute_time:.3f}\t{path_length:.3f}\t{expansions}\t{sol_nodes}"
-        metric_lines.append(seg_str)
-        print(f"Segment {segment_count}: time {compute_time:.3f}s, length {path_length:.3f}m, expansions {expansions}, solution nodes {sol_nodes}")
-
-    with open("detailed_path_metrics.txt", "w") as f:
-        f.write("Segment\tStartGrid(3D)\tGoalGrid(3D)\tComputeTime(s)\tPathLength(m)\tExpandedNodes\tSolutionNodes\n")
-        for line in metric_lines:
-            f.write(line + "\n")
-    print("Saved path metrics to 'detailed_path_metrics.txt'")
-
-    corridor_indices_list = list(all_corridors)
-
-    # Initialize RViz publisher with final refined 3D path and corridor constraints
+            # Straight-line check from center of start cuboid to center of goal cuboid
+            c_s = center_of_cuboid(cuboids[current_start])
+            c_g = center_of_cuboid(cuboids[current_goal])
+            if is_line_in_corridor_3d(cuboids, corridor, c_s, c_g, num_samples=50):
+                # Use linear interpolation
+                expansions = 0
+                sol_nodes = 2
+                path_length = np.linalg.norm(c_g - c_s)
+                path_world = linear_path_3d(c_s, c_g, num_points=20)
+                compute_time = time.time() - start_time
+                print(f"Straight-line used, length={path_length:.3f}m, time={compute_time:.3f}s")
+            else:
+                # 3D corridor A*
+                print("Line check failed; running 3D A* in corridor.")
+                result = astar_in_corridor_3d(cuboids, corridor, c_s, c_g, grid_res=0.1)
+                compute_time = time.time() - start_time
+                if result is None:
+                    print("No fine 3D path found in corridor!")
+                    expansions = 0
+                    sol_nodes = 0
+                    path_length = 0.0
+                    path_world = []
+                else:
+                    (path_world, expansions, path_length, sol_nodes, startG, goalG) = result
+                    print(f"3D A* path found: length={path_length:.3f}m, expansions={expansions}, time={compute_time:.3f}s")
+            
+            # Add final path to overall
+            if seg == 0:
+                overall_3d_path.extend(path_world)
+            else:
+                overall_3d_path.extend(path_world[1:])
+            
+            metrics.append((seg+1, current_start, current_goal, compute_time, path_length))
+        
+        # Next segment
+        current_start = current_goal
+        current_goal = random.randint(0, len(cuboids)-1)
+        while current_goal == current_start:
+            current_goal = random.randint(0, len(cuboids)-1)
+    
+    # Write metrics to file
+    with open("metrics.txt", "w") as f:
+        f.write("Segment\tStartCuboid\tGoalCuboid\tComputeTime(s)\tPathLength(m)\n")
+        for seg, s, g, t, L in metrics:
+            f.write(f"{seg}\t{s}\t{g}\t{t:.3f}\t{L:.3f}\n")
+    print("Metrics saved to metrics.txt")
+    
+    # Initialize RViz with final path
+    # For corridor visualization, we can just union all corridors used
+    # but here we skip that for brevity. We'll pass an empty corridor or a random set
+    corridor_indices_list = []
+    # We pass the final 3D path to the publisher
     drone_mesh_resource = "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
     publisher_node = RVizPublisher(
         points=points,
         cuboids=cuboids,
         corridor_indices=corridor_indices_list,
-        path_indices=final_3d_path,  # we pass the final 3D path points here
-        drone_mesh_resource=drone_mesh_resource,
-        waypoints=waypoints,
-        frame_id="map"
+        path_coords_3d=overall_3d_path,
+        frame_id="map",
+        drone_mesh_resource=drone_mesh_resource
     )
-    
     try:
         rclpy.spin(publisher_node)
     except KeyboardInterrupt:
@@ -717,33 +665,6 @@ def main(args=None):
     finally:
         publisher_node.destroy_node()
         rclpy.shutdown()
-
-#############################################
-# 15. DFS-based Exploration Path Planning with Radius (Optional)
-#############################################
-def build_exploration_path_radius(G, start_node, radius=10.0):
-    explored = set()
-    path = []
-    current = start_node
-    explored.add(current)
-    path.append(current)
-    while True:
-        current_center = (G.nodes[current]['cuboid']['lower'] + G.nodes[current]['cuboid']['upper']) / 2.0
-        candidates = []
-        for nb in G.neighbors(current):
-            if nb not in explored:
-                nb_center = (G.nodes[nb]['cuboid']['lower'] + G.nodes[nb]['cuboid']['upper']) / 2.0
-                d = np.linalg.norm(nb_center - current_center)
-                if d <= radius:
-                    candidates.append((nb, d))
-        if not candidates:
-            break
-        candidates.sort(key=lambda x: x[1])
-        next_node = candidates[0][0]
-        path.append(next_node)
-        explored.add(next_node)
-        current = next_node
-    return path
 
 if __name__ == "__main__":
     main()
