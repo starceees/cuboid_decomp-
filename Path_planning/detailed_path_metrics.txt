@@ -1,0 +1,5 @@
+Segment	StartGrid	GoalGrid	ComputeTime(s)	PathLength(m)	ExpandedNodes	SolutionNodes
+1	(403, 163)	(355, 205)	0.207	6.540	49	49
+2	(355, 205)	(31, 525)	0.131	45.655	325	325
+3	(31, 525)	(507, 427)	0.135	51.659	477	477
+4	(187, 279)	(101, 519)	0.150	37.092	8361	316
