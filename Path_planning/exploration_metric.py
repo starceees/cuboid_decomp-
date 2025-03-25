@@ -4,30 +4,27 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Header
 from sensor_msgs.msg import PointCloud2
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped, Point
 import sensor_msgs_py.point_cloud2 as pc2
-import random, os, time
+import random, heapq, os, pickle, time
+
+# Additional imports for progress and graph plotting
 from tqdm import tqdm
+import networkx as nx
 
 #############################################
-# Utility: Convert grid index to world coordinate (center of voxel)
+# Saving / Loading Functions
 #############################################
-def grid_to_world(idx, global_min, resolution):
-    return global_min + (np.array(idx) + 0.5) * resolution
-
-#############################################
-# Saving Metrics to File
-#############################################
-def save_metrics(metrics, filename="metrics.txt"):
-    with open(filename, "w") as f:
-        f.write("Segment\tStartGrid\tGoalGrid\tComputeTime(s)\tPathLength(m)\tTreeSize\tSolutionNodes\tStartPoint\tGoalPoint\n")
-        for seg, s, g, comp_time, path_length, tree_size, sol_nodes, sp, gp in metrics:
-            sp_str = f"({sp[0]:.2f}, {sp[1]:.2f}, {sp[2]:.2f})"
-            gp_str = f"({gp[0]:.2f}, {gp[1]:.2f}, {gp[2]:.2f})"
-            f.write(f"{seg}\t{s}\t{g}\t{comp_time:.3f}\t{path_length:.3f}\t{tree_size}\t{sol_nodes}\t{sp_str}\t{gp_str}\n")
-    print("Metrics saved to", filename)
+def save_cuboids(cuboids, filename="my_cuboids.pkl"):
+    with open(filename, 'wb') as f:
+        pickle.dump(cuboids, f)
+        
+def load_cuboids(filename="my_cuboids.pkl"):
+    with open(filename, 'rb') as f:
+        cuboids = pickle.load(f)
+    return cuboids
 
 #############################################
 # 1. Obstacle Expansion (3D Safety Margin)
@@ -45,7 +42,7 @@ def build_occupancy_grid(points, global_min, resolution):
     extent = np.max(points, axis=0) - global_min
     nx_dim = int(np.ceil(extent[0] / resolution))
     ny_dim = int(np.ceil(extent[1] / resolution))
-    nz_dim = max(1, int(np.ceil(extent[2] / resolution)))  # Ensure at least one voxel in z
+    nz_dim = int(np.ceil(extent[2] / resolution))
     occupancy = np.zeros((nx_dim, ny_dim, nz_dim), dtype=np.uint8)
     
     idxs = np.floor((points - global_min) / resolution).astype(int)
@@ -55,103 +52,201 @@ def build_occupancy_grid(points, global_min, resolution):
     return occupancy
 
 #############################################
-# 3. Collision-Free Checker and RRT Planner in Voxel Space
+# 3. Region Growing for Free Cuboids
 #############################################
-def collision_free(occupancy, p1, p2, interp_resolution=0.5):
-    p1 = np.array(p1, dtype=float)
-    p2 = np.array(p2, dtype=float)
-    dist = np.linalg.norm(p2 - p1)
-    n_steps = int(np.ceil(dist / interp_resolution)) + 1
-    for t in np.linspace(0, 1, n_steps):
-        pt = p1 + t * (p2 - p1)
-        idx = tuple(np.round(pt).astype(int))
-        if (idx[0] < 0 or idx[0] >= occupancy.shape[0] or
-            idx[1] < 0 or idx[1] >= occupancy.shape[1] or
-            idx[2] < 0 or idx[2] >= occupancy.shape[2]):
-            return False
-        if occupancy[idx] == 1:
+def region_growing_3d(occupancy, max_z_thickness=5):
+    nx, ny, nz = occupancy.shape
+    visited = np.zeros_like(occupancy, dtype=bool)
+    cuboids = []
+    for i in range(nx):
+        for j in range(ny):
+            for k in range(nz):
+                if occupancy[i, j, k] == 0 and not visited[i, j, k]:
+                    i_min, i_max = i, i
+                    j_min, j_max = j, j
+                    k_min, k_max = k, k
+                    changed = True
+                    while changed:
+                        changed = False
+                        if i_max < nx - 1:
+                            candidate = occupancy[i_max+1, j_min:j_max+1, k_min:k_max+1]
+                            if np.all(candidate == 0):
+                                i_max += 1
+                                changed = True
+                        if j_max < ny - 1:
+                            candidate = occupancy[i_min:i_max+1, j_max+1, k_min:k_max+1]
+                            if np.all(candidate == 0):
+                                j_max += 1
+                                changed = True
+                        current_z = k_max - k_min + 1
+                        if current_z < max_z_thickness and k_max < nz - 1:
+                            candidate = occupancy[i_min:i_max+1, j_min:j_max+1, k_max+1]
+                            if np.all(candidate == 0):
+                                k_max += 1
+                                changed = True
+                    visited[i_min:i_max+1, j_min:j_max+1, k_min:k_max+1] = True
+                    cuboids.append({
+                        'min_idx': np.array([i_min, j_min, k_min]),
+                        'dimensions': np.array([i_max - i_min + 1,
+                                                j_max - j_min + 1,
+                                                k_max - k_min + 1])
+                    })
+    return cuboids
+
+#############################################
+# 4. Convert Grid Cuboid to World Coordinates
+#############################################
+def block_to_world_cuboid(block, global_min, resolution):
+    min_idx = block['min_idx']
+    dims = block['dimensions']
+    lower = global_min + (min_idx * resolution)
+    upper = global_min + ((min_idx + dims) * resolution)
+    return {
+        'lower': lower,
+        'upper': upper,
+        'dimensions_world': upper - lower
+    }
+
+#############################################
+# 5. Strict Line-of-Sight Checking
+#############################################
+def line_of_sight_in_cuboids(cub1, cub2, step=0.05):
+    c1 = (cub1['lower'] + cub1['upper']) / 2.0
+    c2 = (cub2['lower'] + cub2['upper']) / 2.0
+    vec = c2 - c1
+    length = np.linalg.norm(vec)
+    if length < 1e-6:
+        return True
+    steps = int(np.ceil(1.0 / step))
+    for i in range(steps + 1):
+        t = i * step
+        if t > 1.0:
+            t = 1.0
+        point = c1 + t * vec
+        if not point_in_union_of_two_cuboids(point, cub1, cub2):
             return False
     return True
 
-def rrt_3d(occupancy, start, goal, max_iter=100000, step_size=10, z_upper=None):
-    dims = occupancy.shape
-    if z_upper is None or z_upper > dims[2]:
-        z_upper = dims[2]
-    tree = {start: None}
-    nodes = [start]
-    for i in tqdm(range(max_iter), desc="RRT iterations"):
-        # Sample a random free voxel
-        ix = np.random.randint(0, dims[0])
-        iy = np.random.randint(0, dims[1])
-        iz = np.random.randint(0, z_upper)
-        if occupancy[ix, iy, iz] != 0:
-            continue
-        rand_node = (ix, iy, iz)
-        # Find nearest node in tree
-        nearest = min(nodes, key=lambda n: np.linalg.norm(np.array(n) - np.array(rand_node)))
-        vec = np.array(rand_node) - np.array(nearest)
-        d = np.linalg.norm(vec)
-        if d == 0:
-            continue
-        if d > step_size:
-            new_node = np.round(np.array(nearest) + (vec / d) * step_size).astype(int)
-        else:
-            new_node = np.array(rand_node)
-        if new_node[2] >= z_upper:
-            continue
-        new_node = tuple(new_node)
-        if occupancy[new_node] == 1:
-            continue
-        if not collision_free(occupancy, nearest, new_node):
-            continue
-        tree[new_node] = nearest
-        nodes.append(new_node)
-        if np.linalg.norm(np.array(new_node) - np.array(goal)) <= step_size:
-            if goal[2] < z_upper and collision_free(occupancy, new_node, goal):
-                tree[goal] = new_node
-                path = []
-                current = goal
-                while current is not None:
-                    path.append(current)
-                    current = tree[current]
-                return path[::-1], len(nodes)
-    return None, len(nodes)
+def point_in_union_of_two_cuboids(pt, cub1, cub2):
+    return point_in_cuboid(pt, cub1) or point_in_cuboid(pt, cub2)
+
+def point_in_cuboid(pt, cub):
+    return np.all(pt >= cub['lower']) and np.all(pt <= cub['upper'])
 
 #############################################
-# 4. ROS2 Publisher Node for Visualization & Drone Motion
+# 6. Build Cuboids with Connectivity (Graph on the Fly)
+#############################################
+def build_cuboids_with_connectivity(free_cuboids_blocks, global_min, resolution, step=0.05):
+    cuboids = []
+    for block in tqdm(free_cuboids_blocks, desc="Building cuboid connectivity"):
+        cub = block_to_world_cuboid(block, global_min, resolution)
+        cub['neighbors'] = []
+        for idx, existing in enumerate(cuboids):
+            if cuboids_touch_or_overlap(cub, existing, tol=0.0):
+                if line_of_sight_in_cuboids(cub, existing, step=step):
+                    cub['neighbors'].append(idx)
+                    existing.setdefault('neighbors', []).append(len(cuboids))
+        cuboids.append(cub)
+    return cuboids
+
+def cuboids_touch_or_overlap(c1, c2, tol=0.0):
+    for i in range(3):
+        if c1['upper'][i] < c2['lower'][i] - tol or c2['upper'][i] < c1['lower'][i] - tol:
+            return False
+    return True
+
+#############################################
+# 7. A* Path Planning on Cuboids Using Their Connectivity
+#############################################
+def astar_on_cuboids(cuboids, start_idx, goal_idx):
+    def center(cub):
+        return (cub['lower'] + cub['upper']) / 2.0
+    def heuristic(i, j):
+        return np.linalg.norm(center(cuboids[i]) - center(cuboids[j]))
+    
+    open_set = []
+    best_cost = {start_idx: 0}
+    visited = set()
+    heapq.heappush(open_set, (heuristic(start_idx, goal_idx), 0, start_idx, [start_idx]))
+    
+    while open_set:
+        f, g, current, path = heapq.heappop(open_set)
+        if current == goal_idx:
+            return path
+        if current in visited:
+            continue
+        visited.add(current)
+        for nb in cuboids[current]['neighbors']:
+            if nb in visited:
+                continue
+            cost_new = g + heuristic(current, nb)
+            if nb not in best_cost or cost_new < best_cost[nb]:
+                best_cost[nb] = cost_new
+                f_new = cost_new + heuristic(nb, goal_idx)
+                heapq.heappush(open_set, (f_new, cost_new, nb, path + [nb]))
+    return None
+
+#############################################
+# 8. Update Connectivity for Cuboids
+#############################################
+def update_connectivity(cuboids, step=0.05, tol=0.0):
+    n = len(cuboids)
+    for cub in cuboids:
+        cub['neighbors'] = []
+    for i in range(n):
+        for j in range(i+1, n):
+            if cuboids_touch_or_overlap(cuboids[i], cuboids[j], tol):
+                if line_of_sight_in_cuboids(cuboids[i], cuboids[j], step=step):
+                    cuboids[i]['neighbors'].append(j)
+                    cuboids[j]['neighbors'].append(i)
+
+#############################################
+# 9. ROS2 Publisher Node for RViz2 Visualization + Path + Drone Mesh
 #############################################
 class RVizPublisher(Node):
-    def __init__(self, points, path_coords, drone_mesh_resource, frame_id="map"):
-        super().__init__('rviz_rrt_planner')
+    def __init__(self, points, cuboids, path_indices, drone_mesh_resource, frame_id="map"):
+        super().__init__('rviz_cuboid_astar')
         qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.QoSReliabilityPolicy.RELIABLE,
             history=rclpy.qos.QoSHistoryPolicy.KEEP_LAST,
             depth=10
         )
         self.pc_pub = self.create_publisher(PointCloud2, '/point_cloud', qos)
+        self.marker_pub_all = self.create_publisher(MarkerArray, '/free_cuboids', qos)
+        self.marker_pub_path = self.create_publisher(MarkerArray, '/path_cuboids', qos)
         self.line_path_pub = self.create_publisher(Marker, '/line_path', qos)
         self.path_pub = self.create_publisher(Path, '/planned_path', qos)
         self.drone_pub = self.create_publisher(Marker, '/drone_mesh', qos)
         
         self.points = points
-        self.path_coords = path_coords  # Overall path in world coordinates
+        self.cuboids = cuboids
+        self.path_indices = path_indices  # Direct path (cuboid indices)
         self.frame_id = frame_id
         
-        self.drone_mesh_resource = drone_mesh_resource
+        self.path_coords = []
+        for idx in path_indices:
+            c = cuboids[idx]
+            center = (c['lower'] + c['upper']) / 2.0
+            self.path_coords.append(center)
+        
+        self.drone_mesh_resource = drone_mesh_resource  # e.g., "file:///home/your_path/mesh.stl"
+        # For continuous drone motion, use segment interpolation:
         self.current_segment_index = 0
         self.alpha = 0.0
-        self.alpha_increment = 0.02
+        self.alpha_increment = 0.02  # Adjust for smoothness
         
         self.timer = self.create_timer(0.1, self.publish_all)
-        self.get_logger().info("RRT Planner Node initialized.")
+        self.get_logger().info("Cuboid + A* Node initialized.")
     
     def publish_all(self):
         now = self.get_clock().now().to_msg()
         self.publish_point_cloud(now)
+        self.publish_all_cuboids(now)
+        self.publish_path_cuboids(now)
         self.publish_line_path(now)
         self.publish_path(now)
         self.publish_drone_marker(now)
-        self.get_logger().info("Published point cloud, path, and drone mesh.")
+        self.get_logger().info("Published point cloud, cuboids, path, and drone mesh.")
     
     def publish_point_cloud(self, stamp):
         header = Header()
@@ -161,6 +256,67 @@ class RVizPublisher(Node):
         pc_msg = pc2.create_cloud_xyz32(header, pc_list)
         self.pc_pub.publish(pc_msg)
     
+    def publish_all_cuboids(self, stamp):
+        marker_array = MarkerArray()
+        mid = 0
+        for cub in self.cuboids:
+            lower = cub['lower']
+            upper = cub['upper']
+            dims = cub['dimensions_world']
+            center = (lower + upper) / 2.0
+            m = Marker()
+            m.header.frame_id = self.frame_id
+            m.header.stamp = stamp
+            m.ns = "all_cuboids"
+            m.id = mid
+            mid += 1
+            m.type = Marker.CUBE
+            m.action = Marker.ADD
+            m.pose.position.x = float(center[0])
+            m.pose.position.y = float(center[1])
+            m.pose.position.z = float(center[2])
+            m.pose.orientation.w = 1.0
+            m.scale.x = float(dims[0])
+            m.scale.y = float(dims[1])
+            m.scale.z = float(dims[2])
+            m.color.r = 0.2
+            m.color.g = 0.8
+            m.color.b = 0.2
+            m.color.a = 0.3
+            marker_array.markers.append(m)
+        self.marker_pub_all.publish(marker_array)
+    
+    def publish_path_cuboids(self, stamp):
+        marker_array = MarkerArray()
+        mid = 0
+        for idx in self.path_indices:
+            cub = self.cuboids[idx]
+            lower = cub['lower']
+            upper = cub['upper']
+            dims = cub['dimensions_world']
+            center = (lower + upper) / 2.0
+            m = Marker()
+            m.header.frame_id = self.frame_id
+            m.header.stamp = stamp
+            m.ns = "path_cuboids"
+            m.id = mid
+            mid += 1
+            m.type = Marker.CUBE
+            m.action = Marker.ADD
+            m.pose.position.x = float(center[0])
+            m.pose.position.y = float(center[1])
+            m.pose.position.z = float(center[2])
+            m.pose.orientation.w = 1.0
+            m.scale.x = float(dims[0])
+            m.scale.y = float(dims[1])
+            m.scale.z = float(dims[2])
+            m.color.r = 0.0
+            m.color.g = 0.5
+            m.color.b = 0.0
+            m.color.a = 0.5
+            marker_array.markers.append(m)
+        self.marker_pub_path.publish(marker_array)
+    
     def publish_line_path(self, stamp):
         marker = Marker()
         marker.header.frame_id = self.frame_id
@@ -169,7 +325,7 @@ class RVizPublisher(Node):
         marker.id = 0
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
-        marker.scale.x = 0.2
+        marker.scale.x = 0.2  # Adjust thickness here
         marker.color.r = 1.0
         marker.color.g = 0.0
         marker.color.b = 0.0
@@ -184,6 +340,7 @@ class RVizPublisher(Node):
         self.line_path_pub.publish(marker)
     
     def publish_path(self, stamp):
+        # Publish the direct path as a nav_msgs/Path
         path_msg = Path()
         path_msg.header.stamp = stamp
         path_msg.header.frame_id = self.frame_id
@@ -199,9 +356,7 @@ class RVizPublisher(Node):
         self.path_pub.publish(path_msg)
     
     def publish_drone_marker(self, stamp):
-        if not self.path_coords:
-            # No path available; nothing to publish.
-            return
+        # Interpolate between waypoints in the direct path
         if len(self.path_coords) < 2:
             pos = self.path_coords[0]
         else:
@@ -235,95 +390,116 @@ class RVizPublisher(Node):
         self.drone_pub.publish(m)
 
 #############################################
-# 5. Main Routine: RRT Planning in Voxel Space with 5 Successive Waypoints & Metrics
+# 12. Main Routine: Cuboid Decomp + A* with Successive Waypoints
 #############################################
 def main(args=None):
     rclpy.init(args=args)
     
     # Load point cloud (Nx3 numpy array)
-    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/occupancy_point_cloud.npy"  # Update as needed
+    pc_file = "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy"  # update as needed
     points = np.load(pc_file)
-    # If loaded as structured array, convert to Nx3
     if points.dtype.names is not None:
         points = np.vstack([points[name] for name in ('x','y','z')]).T
 
-    # Print bounding box in world coordinates
+    # Filter point cloud to only include points with z >= 0
+    min_point_z = 0.0  
+    points = points[points[:,2] >= min_point_z]
+    
+    # Compute bounding box (of filtered points)
     global_min = np.min(points, axis=0)
     global_max = np.max(points, axis=0)
     print("Point Cloud Bounding Box:")
     print("  Min:", global_min)
     print("  Max:", global_max)
     
-    # Build occupancy grid and expand obstacles to add safety margin
+    # Build occupancy grid
     resolution = 0.2
     occupancy = build_occupancy_grid(points, global_min, resolution)
     print(f"Occupancy grid shape: {occupancy.shape}, Occupied voxels: {occupancy.sum()}")
+    
+    # Expand obstacles
     safety_voxels = 2
     occupancy_expanded = expand_obstacles_3d(occupancy, safety_voxels)
     
-    # --- Sample 5 Unique Random Free-Space Waypoints from Occupancy Grid ---
-    free_indices = np.argwhere(occupancy == 0)
-    free_indices = np.unique(free_indices, axis=0)
-    if free_indices.shape[0] < 5:
-        raise ValueError("Not enough free cells available!")
+    # Region growing for free cuboids
+    max_z_thickness = 20  
+    blocks = region_growing_3d(occupancy_expanded, max_z_thickness)
+    print("Found", len(blocks), "free cuboids.")
     
-    # Sample indices directly from free_indices array
-    sample_indices = random.sample(range(len(free_indices)), 5)
-    waypoint_grid_indices = [tuple(free_indices[i]) for i in sample_indices]
-    waypoint_points = [grid_to_world(idx, global_min, resolution) for idx in waypoint_grid_indices]
+    # Load or build cuboids with connectivity and save them
+    cuboids_file = "my_cuboids_hos.pkl"
+    if os.path.exists(cuboids_file):
+        print(f"Loading cuboids from {cuboids_file}...")
+        cuboids = load_cuboids(cuboids_file)
+    else:
+        print("Cuboids file not found. Building cuboids with connectivity...")
+        cuboids = build_cuboids_with_connectivity(blocks, global_min, resolution, step=0.05)
+        for c in cuboids:
+            c['dimensions_world'] = c['upper'] - c['lower']
+        save_cuboids(cuboids, cuboids_file)
+        print(f"Saved cuboids to {cuboids_file}")
     
-    print("Random free-space waypoint coordinates (world):")
-    for pt in waypoint_points:
-        print(pt)
+    print(f"Total cuboids loaded: {len(cuboids)}")
     
-    # --- Plan successive subpaths between the 5 waypoints using RRT in voxel space ---
-    num_segments = len(waypoint_grid_indices) - 1
-    overall_path = []  # Combined grid path (list of grid indices)
-    metrics = []       # (Segment, StartGrid, GoalGrid, ComputeTime, PathLength, TreeSize, SolutionNodes, StartPoint, GoalPoint)
-    current_start = waypoint_grid_indices[0]
+    # Update connectivity for cuboids
+    update_connectivity(cuboids, step=0.05, tol=0.0)
+    
+    # Now, plan successive subpaths between 5 waypoints using cuboid A*
+    num_segments = 5
+    metrics = []   # List to hold metrics for each segment
+    overall_path = []  # Combined list of cuboid indices for the overall path
+    # Randomly choose initial start and goal (from cuboids)
+    current_start = random.randint(0, len(cuboids)-1)
+    current_goal = random.randint(0, len(cuboids)-1)
+    while current_goal == current_start:
+        current_goal = random.randint(0, len(cuboids)-1)
+    
     for seg in range(num_segments):
-        current_goal = waypoint_grid_indices[seg+1]
-        # Check for degenerate case
-        if current_start == current_goal:
-            print(f"Segment {seg+1}: Start and goal are identical; skipping planning.")
-            continue
+        # For each segment, compute A* path
         start_time = time.time()
-        path_segment, tree_size = rrt_3d(occupancy_expanded, current_start, current_goal, max_iter=100000, step_size=10)
+        path_segment = astar_on_cuboids(cuboids, current_start, current_goal)
         compute_time = time.time() - start_time
         if path_segment is None:
             print(f"Segment {seg+1}: No path found from {current_start} to {current_goal}")
             continue
-        # Convert grid path to world coordinates to compute path length
-        path_world = [grid_to_world(pt, global_min, resolution) for pt in path_segment]
-        path_length = sum(np.linalg.norm(np.array(path_world[i+1]) - np.array(path_world[i]))
-                          for i in range(len(path_world)-1))
-        sol_nodes = len(path_segment)
-        metrics.append((seg+1, current_start, current_goal, compute_time, path_length, tree_size, sol_nodes,
-                        grid_to_world(current_start, global_min, resolution),
-                        grid_to_world(current_goal, global_min, resolution)))
-        overall_path.extend(path_segment if seg == 0 else path_segment[1:])
+        # Compute path length as sum of Euclidean distances between consecutive cuboid centers
+        path_length = 0.0
+        for i in range(len(path_segment)-1):
+            c1 = (cuboids[path_segment[i]]['lower'] + cuboids[path_segment[i]]['upper']) / 2.0
+            c2 = (cuboids[path_segment[i+1]]['lower'] + cuboids[path_segment[i+1]]['upper']) / 2.0
+            path_length += np.linalg.norm(c2 - c1)
+        metrics.append((seg+1, current_start, current_goal, compute_time, path_length))
+        overall_path.extend(path_segment if seg==0 else path_segment[1:])  # avoid duplicating nodes between segments
+        print(f"Segment {seg+1}: from {current_start} to {current_goal}, time: {compute_time:.3f}s, length: {path_length:.3f}m")
+        # For next segment, set start = current goal and choose new random goal (different from current goal)
         current_start = current_goal
-        print(f"Segment {seg+1}: from {current_start} to {current_goal}, time: {compute_time:.3f}s, length: {path_length:.3f}m, TreeSize: {tree_size}, SolutionNodes: {sol_nodes}")
+        current_goal = random.randint(0, len(cuboids)-1)
+        while current_goal == current_start:
+            current_goal = random.randint(0, len(cuboids)-1)
     
-    save_metrics(metrics, "metrics.txt")
+    # Write metrics to a text file
+    with open("metrics.txt", "w") as f:
+        f.write("Segment\tStart\tGoal\tComputeTime(s)\tPathLength(m)\n")
+        for seg, s, g, t, L in metrics:
+            f.write(f"{seg}\t{s}\t{g}\t{t:.3f}\t{L:.3f}\n")
+    print("Metrics saved to metrics.txt")
     
-    # If no overall path was found, exit before creating the publisher node.
-    if not overall_path:
-        print("No valid overall path was found. Exiting without visualization.")
-        rclpy.shutdown()
-        return
-
-    # Build overall path in world coordinates using the single conversion function
-    overall_path_coords = [grid_to_world(pt, global_min, resolution) for pt in overall_path]
+    # Build list of centers for the overall path
+    overall_path_coords = []
+    for idx in overall_path:
+        c = cuboids[idx]
+        center = (c['lower'] + c['upper']) / 2.0
+        overall_path_coords.append(center)
     
-    # Define drone mesh resource (using an STL file)
+    # Define your drone mesh resource (using an STL file)
     drone_mesh_resource = "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
     
     # Create ROS2 publisher node for visualization using the overall path
-    publisher_node = RVizPublisher(points, overall_path_coords, drone_mesh_resource, frame_id="map")
+    publisher_node = RVizPublisher(points, cuboids, overall_path, drone_mesh_resource, frame_id="map")
+    publisher_node.current_drone_index = 0
     publisher_node.current_segment_index = 0
     publisher_node.alpha = 0.0
-    publisher_node.alpha_increment = 0.02
+    publisher_node.alpha_increment = 0.02  # Adjust for smooth motion
     
     try:
         rclpy.spin(publisher_node)
