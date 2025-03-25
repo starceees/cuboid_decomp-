@@ -12,6 +12,7 @@ import random, heapq, os, pickle, time
 from collections import deque
 import networkx as nx
 from tqdm import tqdm
+from scipy.interpolate import CubicSpline  # For constrained spline interpolation
 
 #############################################
 # Saving / Loading Functions
@@ -342,6 +343,30 @@ def linear_path_3d(start_pt, goal_pt, num_points=20):
     return [start_pt + t*(goal_pt - start_pt) for t in np.linspace(0, 1, num_points)]
 
 #############################################
+# 2A. Constrained Spline Interpolation
+#############################################
+def constrained_spline_interpolation(control_points, num_points=100):
+    """
+    Given a list of control points (as [x, y, z]), generate a smooth path 
+    that exactly interpolates these points using cubic splines.
+    """
+    control_points = np.array(control_points)
+    # Parameterize the points by cumulative Euclidean distance
+    distances = [0]
+    for i in range(1, len(control_points)):
+        d = np.linalg.norm(control_points[i] - control_points[i-1])
+        distances.append(distances[-1] + d)
+    distances = np.array(distances)
+    # Create a cubic spline for each coordinate
+    cs_x = CubicSpline(distances, control_points[:,0])
+    cs_y = CubicSpline(distances, control_points[:,1])
+    cs_z = CubicSpline(distances, control_points[:,2])
+    # Evaluate the spline at evenly spaced parameters
+    s_new = np.linspace(0, distances[-1], num_points)
+    path = np.vstack((cs_x(s_new), cs_y(s_new), cs_z(s_new))).T
+    return path.tolist()
+
+#############################################
 # 12. RVizPublisher
 #############################################
 class RVizPublisher(Node):
@@ -536,7 +561,7 @@ def main(args=None):
     
     global_min = np.min(points, axis=0)
     global_max = np.max(points, axis=0)
-    print("Point Cloud Bounding Box:")
+    print("[INFO]Point Cloud Bounding Box:")
     print("  Min:", global_min)
     print("  Max:", global_max)
     
@@ -558,20 +583,21 @@ def main(args=None):
     cuboids_file = "my_cuboids_hos.pkl"
     t0_cub = time.time()
     if os.path.exists(cuboids_file):
-        print(f"Loading cuboids from {cuboids_file}...")
+        print(f"[INFO]Loading cuboids from {cuboids_file}...")
         cuboids = load_cuboids(cuboids_file)
     else:
-        print("Cuboids file not found. Building cuboids with connectivity...")
+        print("[INFO]Cuboids file not found. Building cuboids with connectivity...")
         cuboids = build_cuboids_with_connectivity(blocks, global_min, resolution, step=0.05)
         for c in cuboids:
             c['dimensions_world'] = c['upper'] - c['lower']
         save_cuboids(cuboids, cuboids_file)
         print(f"Saved cuboids to {cuboids_file}")
     t1_cub = time.time()
-    print(f"Cuboid decomposition time: {t1_cub - t0_cub:.3f} seconds")
-    print(f"Total cuboids loaded: {len(cuboids)}")
+    print(f"[INFO]Cuboid decomposition time: {t1_cub - t0_cub:.3f} seconds")
+    print(f"[INFO]Total cuboids loaded: {len(cuboids)}")
     
     # Update connectivity
+    print("[INFO]Updating cuboid connectivity...")
     update_connectivity(cuboids, step=0.05, tol=0.0)
     
     # Plan successive subpaths between random cuboid indices
@@ -597,17 +623,31 @@ def main(args=None):
             compute_time = time.time() - start_time
             metrics.append((seg+1, current_start, current_goal, compute_time, 0.0))
         else:
-            # Straight-line check from center of start cuboid to center of goal cuboid
+            # Get centers of start and goal cuboids
             c_s = center_of_cuboid(cuboids[current_start])
             c_g = center_of_cuboid(cuboids[current_goal])
-            if is_line_in_corridor_3d(cuboids, corridor, c_s, c_g, num_samples=50):
-                # Use linear interpolation
+            # Here, we simulate that the actual waypoints differ slightly from the centers.
+            # In practice, you would provide the actual waypoint positions.
+            actual_start = c_s + np.array([0.1, -0.1, 0.0])
+            actual_goal = c_g + np.array([-0.1, 0.1, 0.0])
+            
+            if is_line_in_corridor_3d(cuboids, corridor, c_s, c_g, num_samples=5000):
+                # Use constrained spline interpolation over control points:
+                # Control points: actual_start, intermediate corridor cuboid centers (if any), actual_goal
+                control_points = [actual_start]
+                if len(corridor) > 2:
+                    for idx in corridor[1:-1]:
+                        control_points.append(center_of_cuboid(cuboids[idx]))
+                control_points.append(actual_goal)
+                path_world = constrained_spline_interpolation(control_points, num_points=500000)
+                # Compute path length
+                path_length = 0.0
+                for i in range(len(path_world)-1):
+                    path_length += np.linalg.norm(np.array(path_world[i+1]) - np.array(path_world[i]))
                 expansions = 0
-                sol_nodes = 2
-                path_length = np.linalg.norm(c_g - c_s)
-                path_world = linear_path_3d(c_s, c_g, num_points=20)
+                sol_nodes = len(path_world)
                 compute_time = time.time() - start_time
-                print(f"Straight-line used, length={path_length:.3f}m, time={compute_time:.3f}s")
+                print(f"Constrained spline path used, length={path_length:.3f}m, time={compute_time:.3f}s")
             else:
                 # 3D corridor A*
                 print("Line check failed; running 3D A* in corridor.")
@@ -623,7 +663,7 @@ def main(args=None):
                     (path_world, expansions, path_length, sol_nodes, startG, goalG) = result
                     print(f"3D A* path found: length={path_length:.3f}m, expansions={expansions}, time={compute_time:.3f}s")
             
-            # Add final path to overall
+            # Add final path to overall path (avoiding duplicate points)
             if seg == 0:
                 overall_3d_path.extend(path_world)
             else:
@@ -646,9 +686,9 @@ def main(args=None):
     
     # Initialize RViz with final path
     # For corridor visualization, we can just union all corridors used
-    # but here we skip that for brevity. We'll pass an empty corridor or a random set
+    # but here we skip that for brevity. We'll pass an empty corridor or a random set.
     corridor_indices_list = []
-    # We pass the final 3D path to the publisher
+    # We pass the final 3D path to the publisher.
     drone_mesh_resource = "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
     publisher_node = RVizPublisher(
         points=points,
