@@ -1,3 +1,0 @@
-Cuboid decomposition time: 0.072 seconds
-Path planning times per segment: [0.0053675174713134766, 0.10347533226013184, 0.1472487449645996, 0.010495185852050781]
-Total iterative path planning time: 0.267 seconds

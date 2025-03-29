@@ -1,2 +1,0 @@
-Attempt	StartCuboid	GoalCuboid	ComputeTime(s)	PathLength(m)	SolutionNodes
-1	13284	7038	0.021	17.546	8

@@ -8,7 +8,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped, Point
 import sensor_msgs_py.point_cloud2 as pc2
-import random, heapq, os, pickle, time, json
+import random, heapq, os, pickle, time, json, csv
 from collections import deque
 from tqdm import tqdm
 
@@ -23,6 +23,29 @@ def load_cuboids(filename="my_cuboids.pkl"):
     with open(filename, 'rb') as f:
         cuboids = pickle.load(f)
     return cuboids
+
+#############################################
+# Load Waypoints from TXT File
+#############################################
+def load_waypoints_txt(filename):
+    """
+    Expects a text file where:
+      - The first line is the number of waypoints.
+      - Each waypoint is represented on 7 separate lines:
+          x, y, z, qx, qy, qz, qw.
+    Only x, y, z are returned.
+    """
+    with open(filename, 'r') as f:
+        lines = f.read().splitlines()
+    count = int(lines[0].strip())
+    waypoints = []
+    idx = 1
+    for _ in range(count):
+        # Each waypoint has 7 numbers; take only the first 3 (x, y, z)
+        vals = [float(lines[idx + j].strip()) for j in range(7)]
+        idx += 7
+        waypoints.append(np.array(vals[:3]))
+    return waypoints
 
 #############################################
 # 1. Obstacle Expansion (3D Safety Margin)
@@ -61,7 +84,7 @@ def region_growing_3d(occupancy, max_z_thickness=5):
                 if occupancy[i, j, k] == 0 and not visited[i, j, k]:
                     i_min, i_max = i, i
                     j_min, j_max = j, j
-                    k_min, k_max = k, k
+                    k_min, k_max = k, k 
                     changed = True
                     while changed:
                         changed = False
@@ -263,7 +286,7 @@ class RVizPublisher(Node):
         self.points = points
         self.cuboids = cuboids
         self.path_coords = path_coords  # Direct 3D coordinates (including midpoints)
-        self.waypoints = waypoints      # Random free-space waypoints
+        self.waypoints = waypoints      # Loaded waypoints from file
         self.path_cuboids_indices = path_cuboids_indices  # List of cuboid indices used for planning
         self.frame_id = frame_id
         self.drone_mesh_resource = drone_mesh_resource or ""
@@ -346,8 +369,8 @@ class RVizPublisher(Node):
             m.scale.y = float(dims[1])
             m.scale.z = float(dims[2])
             # Use a distinct color (blue)
-            m.color.r = 0.0
-            m.color.g = 0.0
+            m.color.r = 1.0
+            m.color.g = 1.0
             m.color.b = 1.0
             m.color.a = 0.5
             marker_array.markers.append(m)
@@ -448,20 +471,21 @@ class RVizPublisher(Node):
         self.drone_pub.publish(m)
 
 #############################################
-# 12. Main Routine: Cuboid Decomp + Direct Path via Random Waypoints in Free Space
+# 12. Main Routine: Cuboid Decomp + Direct Path via Waypoints from File
 #############################################
 def main(args=None):
     rclpy.init(args=args)
     
     # CONFIG: Adjust these parameters as needed
     CONFIG = {
-        "POINT_CLOUD_FILE": "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy",
-        "MIN_POINT_Z": 0.0,
+        "POINT_CLOUD_FILE": "../pointcloud/pointcloud_hos/point_cloud_hos.npy",
+        "MIN_POINT_Z": -1.0,
+        "MAX_POINT_Z": 100.0, 
         "RESOLUTION": 0.2,
-        "SAFETY_VOXELS": 2,
-        "MAX_Z_THICKNESS": 20,
+        "SAFETY_VOXELS": 1,
+        "MAX_Z_THICKNESS": 1,
         "CUBOIDS_FILE": "my_cuboids_hos.pkl",
-        "NUM_WAYPOINTS": 5,  # Number of waypoints to generate (can be increased)
+        "WAYPOINTS_FILE": "../waypoints/waypoints_hos.txt",  # New: file containing waypoints
         "DRONE_MESH_RESOURCE": "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
     }
     
@@ -469,13 +493,22 @@ def main(args=None):
     points = np.load(CONFIG["POINT_CLOUD_FILE"])
     if points.dtype.names is not None:
         points = np.vstack([points[name] for name in ('x', 'y', 'z')]).T
-    points = points[points[:,2] >= CONFIG["MIN_POINT_Z"]]
+
+    z_min = CONFIG["MIN_POINT_Z"]
+    z_max = CONFIG["MAX_POINT_Z"]
+    points = points[(points[:,2] >= z_min) & (points[:,2] <= z_max)]
     
     global_min = np.min(points, axis=0)
     global_max = np.max(points, axis=0)
     print(f"[INFO] Point Cloud Bounding Box:")
     print(f"[INFO]   Min: {global_min}")
     print(f"[INFO]   Max: {global_max}")
+    
+    # Record size of the point cloud for metrics
+    size_point_cloud = points.shape[0]
+    
+    # Start cuboid decomposition timer
+    start_decomp = time.time()
     
     # Build occupancy grid and expand obstacles
     occupancy = build_occupancy_grid(points, global_min, CONFIG["RESOLUTION"])
@@ -502,21 +535,17 @@ def main(args=None):
     
     update_connectivity(cuboids, step=0.05, tol=0.0)
     
-    # Generate NUM_WAYPOINTS random waypoints from free space:
-    # Sample a random point uniformly from within a randomly chosen cuboid.
-    waypoints = []
-    for _ in range(CONFIG["NUM_WAYPOINTS"]):
-        idx = random.randint(0, len(cuboids)-1)
-        cub = cuboids[idx]
-        lower = cub['lower']
-        upper = cub['upper']
-        pt = np.array([random.uniform(lower[i], upper[i]) for i in range(3)])
-        waypoints.append(pt)
-    print(f"[INFO] Generated {CONFIG['NUM_WAYPOINTS']} random waypoints in free space.")
+    # End cuboid decomp timer
+    total_decomp_time = time.time() - start_decomp
+    
+    # Load waypoints from the specified txt file
+    waypoints = load_waypoints_txt(CONFIG["WAYPOINTS_FILE"])
+    print(f"[INFO] Loaded {len(waypoints)} waypoints from {CONFIG['WAYPOINTS_FILE']}.")
     
     overall_path_coords = []  # Complete direct path (list of 3D points)
-    metrics = []  # To store metrics for each segment
     used_path_indices = set()  # To accumulate cuboid indices used in planning
+    total_connectivity_time = 0.0  # Sum of A* planning times per segment
+    total_path_length = 0.0  # Sum of lengths of all planned segments
     
     # For each consecutive pair of waypoints, plan a segment
     for i in range(len(waypoints)-1):
@@ -530,39 +559,36 @@ def main(args=None):
         if connectivity_path is None:
             print(f"[INFO] No connectivity path found for segment {i+1}.")
             continue
-        # Update union of used cuboid indices
+        seg_time = time.time() - seg_start_time
+        total_connectivity_time += seg_time
+        
         used_path_indices.update(connectivity_path)
         direct_path_segment = compute_direct_path(cuboids, connectivity_path, start_wp, end_wp)
-        seg_time = time.time() - seg_start_time
         seg_length = sum(np.linalg.norm(np.array(direct_path_segment[j+1]) - np.array(direct_path_segment[j]))
                          for j in range(len(direct_path_segment)-1))
+        total_path_length += seg_length
+        
         if i == 0:
             overall_path_coords.extend(direct_path_segment)
         else:
             overall_path_coords.extend(direct_path_segment[1:])
-        metrics.append({
-            "Segment": i+1,
-            "StartCuboid": start_idx,
-            "GoalCuboid": end_idx,
-            "ComputeTime(s)": seg_time,
-            "PathLength(m)": seg_length,
-            "DirectPathPoints": direct_path_segment
-        })
         print(f"[INFO] Segment {i+1}: time: {seg_time:.3f}s, length: {seg_length:.3f}m")
     
-    with open("metrics.txt", "w") as f:
-        f.write("Segment\tStartCuboid\tGoalCuboid\tComputeTime(s)\tPathLength(m)\tDirectPathPoints\n")
-        for m in metrics:
-            dp_str = json.dumps(m["DirectPathPoints"])
-            f.write(f'{m["Segment"]}\t{m["StartCuboid"]}\t{m["GoalCuboid"]}\t{m["ComputeTime(s)"]:.3f}\t{m["PathLength(m)"]:.3f}\t{dp_str}\n')
-    print(f"[INFO] Metrics saved to metrics.txt")
+    # Compute graph size: count of edges (each edge counted once)
+    graph_size = sum(len(cub['neighbors']) for cub in cuboids) // 2
     
-    # Convert used_path_indices to a list
-    used_path_indices = list(used_path_indices)
+    # Save overall metrics to CSV
+    with open("metrics.csv", "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Size of point cloud", "number of cuboids", "number of cuboids for the path", 
+                         "Total Cuboid Decomp time", "Path cuboid Connective time", "Path Length", "graph size"])
+        writer.writerow([size_point_cloud, len(cuboids), len(used_path_indices),
+                         total_decomp_time, total_connectivity_time, total_path_length, graph_size])
+    print(f"[INFO] Metrics saved to metrics.csv")
     
     # Create ROS2 publisher node for visualization,
     # passing overall direct path, waypoints, and the cuboids used for planning.
-    publisher_node = RVizPublisher(points, cuboids, overall_path_coords, waypoints, used_path_indices,
+    publisher_node = RVizPublisher(points, cuboids, overall_path_coords, waypoints, list(used_path_indices),
                                    frame_id="map", drone_mesh_resource=CONFIG["DRONE_MESH_RESOURCE"])
     try:
         rclpy.spin(publisher_node)
