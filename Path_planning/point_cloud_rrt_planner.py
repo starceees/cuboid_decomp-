@@ -14,6 +14,7 @@ import sensor_msgs_py.point_cloud2 as pc2
 from sensor_msgs.msg import PointCloud2
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from visualization_msgs.msg import Marker
+from scipy.spatial import cKDTree
 
 #############################################
 # 1. Obstacle Expansion (Safety Margin)
@@ -43,11 +44,12 @@ def collision_free(occupancy, p1, p2, interp_resolution=0.5):
             return False
     return True
 
-def rrt_3d(occupancy, start, goal, max_iter=5000000, step_size=20, z_upper=None):
+
+def rrt_3d(occupancy, start, goal, max_iter=5000000, step_size=20, z_upper=None, kd_rebuild_interval=100):
     dims = occupancy.shape
     if z_upper is None or z_upper > dims[2]:
         z_upper = dims[2]
-    print(f"[INFO] Running RRT planner: max_iter={max_iter}, step_size={step_size}, z_upper={z_upper}")
+    print(f"[INFO] Running RRT planner with KD-tree: max_iter={max_iter}, step_size={step_size}, z_upper={z_upper}")
     
     def sample_free():
         while True:
@@ -59,10 +61,15 @@ def rrt_3d(occupancy, start, goal, max_iter=5000000, step_size=20, z_upper=None)
     
     tree = {start: None}
     nodes = [start]
+    # Initialize the KD-tree with the starting node.
+    kd_tree = cKDTree(np.array(nodes))
     
     for i in range(max_iter):
         rand_node = sample_free()
-        nearest = min(nodes, key=lambda n: np.linalg.norm(np.array(n) - np.array(rand_node)))
+        # Use KD-tree to efficiently find the nearest neighbor.
+        dist, idx = kd_tree.query(rand_node)
+        nearest = nodes[idx]
+        
         vec = np.array(rand_node) - np.array(nearest)
         d = np.linalg.norm(vec)
         if d == 0:
@@ -80,8 +87,15 @@ def rrt_3d(occupancy, start, goal, max_iter=5000000, step_size=20, z_upper=None)
             continue
         if not collision_free(occupancy, nearest, new_node):
             continue
+        
         tree[new_node] = nearest
         nodes.append(new_node)
+        
+        # Periodically rebuild the KD-tree to include new nodes.
+        if len(nodes) % kd_rebuild_interval == 0:
+            kd_tree = cKDTree(np.array(nodes))
+            
+        # Check if we have reached the goal.
         if np.linalg.norm(np.array(new_node) - np.array(goal)) <= step_size:
             if goal[2] < z_upper and collision_free(occupancy, new_node, goal):
                 tree[goal] = new_node
