@@ -478,14 +478,14 @@ def main(args=None):
     
     # CONFIG: Adjust these parameters as needed
     CONFIG = {
-        "POINT_CLOUD_FILE": "../pointcloud/pointcloud_minco/point_cloud_minco.npy",
+        "POINT_CLOUD_FILE": "../pointcloud/pointcloud_gq/point_cloud_gq.npy",
         "MIN_POINT_Z": -1.0,
         "MAX_POINT_Z": 100.0, 
         "RESOLUTION": 0.2,
         "SAFETY_VOXELS": 1,
         "MAX_Z_THICKNESS": 1,
-        "CUBOIDS_FILE": "my_cuboids_minco.pkl",
-        "WAYPOINTS_FILE": "../waypoints/waypoint_minco.txt",  # New: file containing waypoints
+        "CUBOIDS_FILE": "my_cuboids_gq.pkl",
+        "WAYPOINTS_FILE": "../waypoints/waypoints_gq.txt",  # New: file containing waypoints
         "DRONE_MESH_RESOURCE": "file://../simulator/meshes/race2.stl"
     }
     
@@ -578,7 +578,7 @@ def main(args=None):
     graph_size = sum(len(cub['neighbors']) for cub in cuboids) // 2
     
     # Save overall metrics to CSV
-    with open("metrics_minco.csv", "w", newline="") as csvfile:
+    with open("metrics_gq_new.csv", "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(["Size of point cloud", "number of cuboids", "number of cuboids for the path", 
                          "Total Cuboid Decomp time", "Path cuboid Connective time", "Path Length", "graph size"])

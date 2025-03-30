@@ -237,16 +237,16 @@ def save_metrics_csv(metrics, metrics_filepath):
 def main(args=None):
     # CONFIGURATION parameters
     CONFIG = {
-        "POINT_CLOUD_FILE": "/home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/pointcloud/pointcloud_gq/point_cloud_gq.npy",  # update as needed
+        "POINT_CLOUD_FILE": "../pointcloud/pointcloud_hos/point_cloud_hos.npy",  # update as needed
         "RESOLUTION": 0.2,
         "SAFETY_VOXELS": 2,
-        "MAX_ITER": 500,            # for each segment, reduce max iterations for demo purposes
-        "STEP_SIZE": 20,
+        "MAX_ITER": 50000,            # for each segment, reduce max iterations for demo purposes
+        "STEP_SIZE": 200,
         "Z_RESTRICT": 2.0/3.0,      # restrict z-range to 2/3 of grid height
-        "WAYPOINTS_FILE": "waypoints.txt",  # file containing waypoints (first line = count, then 7 lines per waypoint)
+        "WAYPOINTS_FILE": "../waypoints/waypoints_hos.txt",  # file containing waypoints (first line = count, then 7 lines per waypoint)
         "METRICS_DIR": "metrics_rrt",
-        "METRICS_FILENAME": "metrics_rrt.csv",
-        "DRONE_MESH_RESOURCE": "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
+        "METRICS_FILENAME": "metrics_rrt_hos.csv",
+        "DRONE_MESH_RESOURCE": "file://../simulator/meshes/race2.stl"
     }
     
     # Load point cloud to build occupancy grid.
