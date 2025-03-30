@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import csv
 import numpy as np
 import heapq
 import time
@@ -111,7 +112,7 @@ def load_waypoints_txt(filename):
       - The first line is the number of waypoints.
       - Each waypoint is represented on 7 separate lines:
           x, y, z, qx, qy, qz, qw.
-    Only the (x,y,z) values are returned as numpy arrays.
+    Only the (x, y, z) values are returned as numpy arrays.
     """
     with open(filename, 'r') as f:
         lines = f.read().splitlines()
@@ -218,15 +219,16 @@ class PathVisualizer(Node):
         self.drone_pub.publish(m)
 
 #############################################
-# 6. Save Metrics Function (with Parameterized File & Directory)
+# 6. Save Metrics Function (CSV Format)
 #############################################
-def save_metrics(metrics, metrics_filepath):
-    header = "Segment\tStartGrid\tGoalGrid\tComputeTime(s)\tPathLength(m)\tTreeSize\tSolutionNodes\n"
-    with open(metrics_filepath, "w") as f:
-        f.write(header)
+def save_metrics_csv(metrics, metrics_filepath):
+    header = ["Segment", "StartGrid", "GoalGrid", "ComputeTime(s)", "PathLength(m)", "TreeSize", "SolutionNodes"]
+    with open(metrics_filepath, "w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(header)
         for m in metrics:
             seg, start_grid, goal_grid, comp_time, path_length, tree_size, sol_nodes = m
-            f.write(f"{seg}\t{start_grid}\t{goal_grid}\t{comp_time:.3f}\t{path_length:.3f}\t{tree_size}\t{sol_nodes}\n")
+            writer.writerow([seg, str(start_grid), str(goal_grid), f"{comp_time:.3f}", f"{path_length:.3f}", tree_size, sol_nodes])
     print(f"[INFO] Metrics saved to {metrics_filepath}")
 
 #############################################
@@ -243,7 +245,7 @@ def main(args=None):
         "Z_RESTRICT": 2.0/3.0,      # restrict z-range to 2/3 of grid height
         "WAYPOINTS_FILE": "waypoints.txt",  # file containing waypoints (first line = count, then 7 lines per waypoint)
         "METRICS_DIR": "metrics_rrt",
-        "METRICS_FILENAME": "metrics_rrt.txt",
+        "METRICS_FILENAME": "metrics_rrt.csv",
         "DRONE_MESH_RESOURCE": "file:///home/raghuram/ARPL/cuboid_decomp/cuboid_decomp-/simulator/meshes/race2.stl"
     }
     
@@ -288,7 +290,6 @@ def main(args=None):
         print(f"[INFO] Loaded {len(loaded_waypoints)} waypoints from {CONFIG['WAYPOINTS_FILE']}")
         for wp in loaded_waypoints:
             grid_idx = np.floor((wp - min_bound) / resolution).astype(int)
-            # Clip indices to be within the occupancy grid bounds.
             grid_idx = np.clip(grid_idx, [0,0,0], [nx-1, ny-1, nz-1])
             waypoints.append(tuple(grid_idx))
     except Exception as e:
@@ -351,7 +352,7 @@ def main(args=None):
     metrics_dir = CONFIG["METRICS_DIR"]
     os.makedirs(metrics_dir, exist_ok=True)
     metrics_filepath = os.path.join(metrics_dir, CONFIG["METRICS_FILENAME"])
-    save_metrics(metrics, metrics_filepath)
+    save_metrics_csv(metrics, metrics_filepath)
     
     if not overall_path:
         print("[ERROR] No valid overall path was found. Exiting without visualization.")
