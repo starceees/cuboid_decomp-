@@ -4,6 +4,7 @@ import csv
 import numpy as np
 import heapq
 import time
+from tqdm import tqdm           
 import scipy.ndimage as ndi
 import rclpy
 from rclpy.node import Node

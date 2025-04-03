@@ -1,2 +1,0 @@
-Segment,StartGrid,GoalGrid,ComputeTime(s),PathLength(m),TreeSize,SolutionNodes
-1,"(141, 88, 14)","(139, 237, 15)",0.093,44.033,75,13
